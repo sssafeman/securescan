@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from securescan.detect.models import Patch, ValidatedFinding
-from securescan.remediate.codex_client import CodexClient
+from securescan.analyze.opus_client import LLMResponse, OpusClient
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ def _validate_syntax(code: str, file_path: str) -> bool:
 
 
 def generate_patch(
-    client: CodexClient,
+    client: OpusClient,
     finding: ValidatedFinding,
     repo_root: Path,
 ) -> Patch | None:
@@ -156,22 +156,30 @@ def generate_patch(
 
     prompt = _build_patch_prompt(finding, repo_root)
 
-    response = client.generate(
+    response = client.analyze(
         system_prompt=PATCH_SYSTEM_PROMPT,
         user_prompt=prompt,
         max_tokens=4096,
         temperature=0.0,
-        expect_json=True,
     )
 
-    if not response.success or not response.json_data:
+    response_obj: LLMResponse = response
+    if not response_obj.success:
         logger.warning(
             f"Patch generation failed for {raw.file_path}:{raw.line_start}: "
-            f"{response.error or 'No JSON in response'}"
+            f"{response_obj.error or 'Analysis call failed'}"
         )
         return None
 
-    data = response.json_data
+    json_data = OpusClient._extract_json(response_obj.content)
+    if not json_data:
+        logger.warning(
+            f"Patch generation failed for {raw.file_path}:{raw.line_start}: "
+            "No JSON in response"
+        )
+        return None
+
+    data = json_data
     fixed_code = data.get("fixed_code", "")
     explanation = data.get("explanation", "No explanation provided")
 
@@ -198,7 +206,7 @@ def generate_patch(
 
 
 def generate_patches(
-    client: CodexClient,
+    client: OpusClient,
     findings: list[ValidatedFinding],
     repo_root: Path,
 ) -> list[Patch]:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 
 try:
     from dotenv import load_dotenv
@@ -13,6 +14,8 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for minimal envs
         return False
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,11 @@ class Config:
     work_dir: Path = Path(os.getenv("SECURESCAN_WORK_DIR", "/tmp/securescan"))
 
     # LLM settings
-    opus_model: str = "claude-opus-4-6"
+    opus_model: str = field(
+        default_factory=lambda: os.getenv(
+            "OPUS_MODEL", "claude-sonnet-4-5-20250514"
+        )
+    )
     opus_max_tokens: int = 8192
     codex_model: str = "gpt-5.3-codex"  # Verify exact model string
 
@@ -80,7 +87,9 @@ class Config:
         if not self.anthropic_api_key:
             errors.append("ANTHROPIC_API_KEY not set")
         if not self.openai_api_key:
-            errors.append("OPENAI_API_KEY not set")
+            logger.warning(
+                "OPENAI_API_KEY not set - patch generation will use Anthropic"
+            )
         return errors
 
 

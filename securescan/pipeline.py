@@ -267,26 +267,22 @@ def run_pipeline(
         confirmed = [finding for finding in (ctx.validated_findings or []) if finding.is_confirmed]
 
         # Stage 6: Remediate
-        if confirmed and config.openai_api_key:
+        if confirmed:
             logger.info("=" * 60)
-            logger.info("STAGE 6: REMEDIATE (GPT Patch Generation)")
+            logger.info("STAGE 6: REMEDIATE (Anthropic Patch Generation)")
             logger.info("=" * 60)
 
             try:
-                from securescan.remediate.codex_client import CodexClient
                 from securescan.remediate.patch_generator import generate_patches
 
-                with CodexClient() as codex:
-                    ctx.patches = generate_patches(
-                        client=codex,
-                        findings=ctx.validated_findings or [],
-                        repo_root=ctx.repo_info.local_path,
-                    )
+                ctx.patches = generate_patches(
+                    client=client,
+                    findings=ctx.validated_findings or [],
+                    repo_root=ctx.repo_info.local_path,
+                )
             except Exception as e:
                 logger.warning(f"Patch generation failed: {e}")
                 ctx.patches = []
-        elif confirmed:
-            logger.info("Skipping patch generation (no OpenAI API key)")
 
         # Stage 7: Report
         logger.info("=" * 60)
@@ -297,14 +293,17 @@ def run_pipeline(
             try:
                 summary_response = client.analyze(
                     system_prompt=(
-                        "You are a security report writer. Write a concise executive summary."
+                        "You are a security report writer. Write a concise 2-3 sentence "
+                        "executive summary in plain text. Do NOT use markdown formatting - "
+                        "no headers, no bold, no bullet points."
                     ),
                     user_prompt=(
                         f"Repository: {ctx.repo_info.name}\n"
                         f"Confirmed vulnerabilities: {len(confirmed)}\n"
                         f"Types: {', '.join(set(f.enriched.raw.vuln_type.value for f in confirmed))}\n"
                         f"Severities: {', '.join(set(f.enriched.severity.value for f in confirmed))}\n"
-                        "Write a 2-3 sentence executive summary for a security audit report."
+                        "Write a 2-3 sentence executive summary for a security audit report.\n"
+                        "Respond in plain text only, no markdown."
                     ),
                     max_tokens=300,
                     temperature=0.3,
