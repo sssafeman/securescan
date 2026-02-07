@@ -46,7 +46,7 @@ class Config:
     # LLM settings
     opus_model: str = field(
         default_factory=lambda: os.getenv(
-            "OPUS_MODEL", "claude-sonnet-4-5-20250514"
+            "OPUS_MODEL", "claude-opus-4-6"
         )
     )
     opus_max_tokens: int = 8192

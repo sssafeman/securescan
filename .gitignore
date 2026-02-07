@@ -31,3 +31,4 @@ Thumbs.db
 # SecureScan working dirs
 /reports/
 /tmp/
+.env
