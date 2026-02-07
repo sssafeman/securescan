@@ -1,0 +1,43 @@
+rules:
+  - id: securescan-sqli-js-template-literal
+    patterns:
+      - pattern: |
+          $DB.query(`...${$VAR}...`)
+    message: >
+      SQL query uses template literal with interpolated variable '$VAR'.
+      This is vulnerable to SQL injection. Use parameterized queries.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      category: sql-injection
+      confidence: HIGH
+
+  - id: securescan-sqli-js-concat
+    patterns:
+      - pattern: |
+          $DB.query($SQL + ...)
+    message: >
+      SQL query uses string concatenation.
+      This is vulnerable to SQL injection. Use parameterized queries.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      category: sql-injection
+      confidence: HIGH
+
+  - id: securescan-sqli-js-raw-sequelize
+    patterns:
+      - pattern: |
+          $SEQ.query($QUERY, ...)
+      - metavariable-pattern:
+          metavariable: $QUERY
+          patterns:
+            - pattern-not: "..."
+    message: >
+      Sequelize raw query with a variable argument.
+      Ensure the query uses bind parameters, not string interpolation.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      category: sql-injection
+      confidence: MEDIUM

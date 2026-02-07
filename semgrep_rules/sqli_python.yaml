@@ -1,0 +1,69 @@
+rules:
+  - id: securescan-sqli-python-fstring
+    patterns:
+      - pattern: |
+          $CURSOR.execute(f"...{$VAR}...")
+    message: >
+      SQL query uses f-string interpolation with variable '$VAR'.
+      This is vulnerable to SQL injection. Use parameterized queries instead.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: sql-injection
+      confidence: HIGH
+
+  - id: securescan-sqli-python-format
+    patterns:
+      - pattern: |
+          $CURSOR.execute("...".format(...))
+    message: >
+      SQL query uses .format() string interpolation.
+      This is vulnerable to SQL injection. Use parameterized queries instead.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: sql-injection
+      confidence: HIGH
+
+  - id: securescan-sqli-python-percent
+    patterns:
+      - pattern: |
+          $CURSOR.execute("..." % ...)
+    message: >
+      SQL query uses %-style string formatting.
+      This is vulnerable to SQL injection. Use parameterized queries instead.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: sql-injection
+      confidence: HIGH
+
+  - id: securescan-sqli-python-concat
+    patterns:
+      - pattern: |
+          $CURSOR.execute($SQL + ...)
+    message: >
+      SQL query uses string concatenation.
+      This is vulnerable to SQL injection. Use parameterized queries instead.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: sql-injection
+      confidence: HIGH
+
+  - id: securescan-sqli-python-raw-text-exec
+    patterns:
+      - pattern: |
+          $DB.execute(text($QUERY))
+      - metavariable-pattern:
+          metavariable: $QUERY
+          patterns:
+            - pattern-not: "..."
+    message: >
+      SQLAlchemy text() called with a variable that may contain
+      unsanitized user input. Ensure the query is parameterized.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: sql-injection
+      confidence: MEDIUM
