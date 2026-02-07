@@ -72,7 +72,7 @@ The HTML report includes full analysis, taint chains, adversarial debate transcr
 ### Prerequisites
 
 - Python 3.11+
-- [Semgrep](https://semgrep.dev/docs/getting-started/) (`pip install semgrep`)
+- Git
 - [Anthropic API key](https://console.anthropic.com/) (for LLM analysis)
 
 ### Installation
@@ -80,7 +80,10 @@ The HTML report includes full analysis, taint chains, adversarial debate transcr
 ```bash
 git clone https://github.com/sssafeman/securescan.git
 cd securescan
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -e .
+pip install -r requirements.txt
 ```
 
 ### Configuration
