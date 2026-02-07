@@ -6,8 +6,8 @@ Wires together all stages of the SecureScan pipeline:
 3. Detect (semgrep + secrets scanner)
 4. Analyze (LLM semantic analysis)
 5. Validate (adversarial false-positive review)
-6. Remediate (patch generation) - placeholder for Task 04
-7. Report (HTML generation) - placeholder for Task 05
+6. Remediate (patch generation)
+7. Report (summary generation)
 """
 
 from __future__ import annotations
@@ -107,12 +107,86 @@ def run_pipeline(
     )
     ctx.raw_findings.extend(semgrep_findings)
 
-    file_list = [(file_entry.relative_path, file_entry.absolute_path) for file_entry in ctx.manifest.files]
+    # 3b: Secrets scanner - scan ALL text files, not just source code
+    # Secrets can be in config files, .env files, .key files, etc.
+    secrets_file_list: list[tuple[str, Path]] = []
+    secrets_extensions = {
+        ".py",
+        ".js",
+        ".ts",
+        ".jsx",
+        ".tsx",
+        ".mjs",
+        ".cjs",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".cfg",
+        ".ini",
+        ".conf",
+        ".env",
+        ".properties",
+        ".xml",
+        ".key",
+        ".pem",
+        ".cert",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".bat",
+        ".ps1",
+        ".rb",
+        ".go",
+        ".rs",
+        ".java",
+        ".cs",
+        ".php",
+        ".tf",
+        ".hcl",
+        ".dockerfile",
+        "",
+    }
+    secrets_skip_dirs = set(config.skip_dirs)
+
+    for path in sorted(ctx.repo_info.local_path.rglob("*")):
+        if not path.is_file():
+            continue
+
+        rel = path.relative_to(ctx.repo_info.local_path)
+        if any(part in secrets_skip_dirs or part.startswith(".") for part in rel.parts[:-1]):
+            continue
+
+        if path.suffix.lower() in secrets_extensions or path.name.lower() in (
+            "dockerfile",
+            ".env",
+            ".env.example",
+            ".env.local",
+            ".env.production",
+            ".env.development",
+        ):
+            secrets_file_list.append((str(rel), path))
+
+    # Also include the manifest files to ensure we don't miss source code
+    included_paths = {rel_path for rel_path, _ in secrets_file_list}
+    for file_entry in ctx.manifest.files:
+        if file_entry.relative_path not in included_paths:
+            secrets_file_list.append((file_entry.relative_path, file_entry.absolute_path))
+
+    file_list = secrets_file_list
     secrets_findings = scan_repo_for_secrets(
         repo_path=ctx.repo_info.local_path,
         files=file_list,
     )
     ctx.raw_findings.extend(secrets_findings)
+
+    # Deduplicate findings on same file+line (keep highest confidence)
+    seen: dict[tuple[str, int], RawFinding] = {}
+    for f in ctx.raw_findings:
+        key = (f.file_path, f.line_start)
+        if key not in seen or f.confidence > seen[key].confidence:
+            seen[key] = f
+    ctx.raw_findings = list(seen.values())
 
     logger.info(
         f"Detection complete: {len(ctx.raw_findings)} raw findings "
@@ -164,6 +238,9 @@ def run_pipeline(
         raw_findings=ctx.raw_findings,
     )
 
+    ctx.patches = []
+    executive_summary = ""
+
     with OpusClient() as client:
         ctx.enriched_findings = analyze_findings(
             client=client,
@@ -187,6 +264,59 @@ def run_pipeline(
                 confidence_threshold=config.confidence_threshold,
             )
 
+        confirmed = [finding for finding in (ctx.validated_findings or []) if finding.is_confirmed]
+
+        # Stage 6: Remediate
+        if confirmed and config.openai_api_key:
+            logger.info("=" * 60)
+            logger.info("STAGE 6: REMEDIATE (GPT Patch Generation)")
+            logger.info("=" * 60)
+
+            try:
+                from securescan.remediate.codex_client import CodexClient
+                from securescan.remediate.patch_generator import generate_patches
+
+                with CodexClient() as codex:
+                    ctx.patches = generate_patches(
+                        client=codex,
+                        findings=ctx.validated_findings or [],
+                        repo_root=ctx.repo_info.local_path,
+                    )
+            except Exception as e:
+                logger.warning(f"Patch generation failed: {e}")
+                ctx.patches = []
+        elif confirmed:
+            logger.info("Skipping patch generation (no OpenAI API key)")
+
+        # Stage 7: Report
+        logger.info("=" * 60)
+        logger.info("STAGE 7: REPORT")
+        logger.info("=" * 60)
+
+        if confirmed:
+            try:
+                summary_response = client.analyze(
+                    system_prompt=(
+                        "You are a security report writer. Write a concise executive summary."
+                    ),
+                    user_prompt=(
+                        f"Repository: {ctx.repo_info.name}\n"
+                        f"Confirmed vulnerabilities: {len(confirmed)}\n"
+                        f"Types: {', '.join(set(f.enriched.raw.vuln_type.value for f in confirmed))}\n"
+                        f"Severities: {', '.join(set(f.enriched.severity.value for f in confirmed))}\n"
+                        "Write a 2-3 sentence executive summary for a security audit report."
+                    ),
+                    max_tokens=300,
+                    temperature=0.3,
+                )
+                if summary_response.success:
+                    executive_summary = summary_response.content
+            except Exception:
+                executive_summary = (
+                    f"SecureScan identified {len(confirmed)} confirmed vulnerabilities in "
+                    f"{ctx.repo_info.name}. Manual review and remediation is recommended."
+                )
+
         logger.info(client.usage.summary())
 
     confirmed = [finding for finding in (ctx.validated_findings or []) if finding.is_confirmed]
@@ -201,7 +331,8 @@ def run_pipeline(
         total_lines=ctx.manifest.total_lines,
         raw_findings_count=len(ctx.raw_findings),
         confirmed_findings=confirmed,
-        patches=[],
+        patches=ctx.patches or [],
+        executive_summary=executive_summary,
         scan_duration_seconds=time.time() - start_time,
     )
 

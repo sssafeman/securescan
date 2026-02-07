@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SecureScan Report - {{ result.repo_name }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1117;
+            color: #e1e4e8;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .header {
+            border-bottom: 1px solid #2d333b;
+            padding-bottom: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            color: #58a6ff;
+            margin-bottom: 0.5rem;
+        }
+
+        .header .subtitle {
+            color: #8b949e;
+            font-size: 1rem;
+        }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .meta-card {
+            background: #161b22;
+            border: 1px solid #2d333b;
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .meta-card .label {
+            color: #8b949e;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .meta-card .value {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: #e1e4e8;
+            margin-top: 0.25rem;
+        }
+
+        .severity {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .severity-critical { background: #6e1320; color: #ff6b6b; border: 1px solid #da3633; }
+        .severity-high { background: #5c2d0e; color: #ff9a5c; border: 1px solid #d29922; }
+        .severity-medium { background: #3d3409; color: #e3b341; border: 1px solid #9e7c0a; }
+        .severity-low { background: #0c2d1a; color: #56d364; border: 1px solid #238636; }
+
+        .executive-summary {
+            background: #161b22;
+            border: 1px solid #2d333b;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .executive-summary h2 {
+            color: #58a6ff;
+            margin-bottom: 1rem;
+            font-size: 1.3rem;
+        }
+
+        .executive-summary p {
+            color: #c9d1d9;
+            line-height: 1.8;
+        }
+
+        .findings-section h2 {
+            color: #58a6ff;
+            margin-bottom: 1.5rem;
+            font-size: 1.3rem;
+        }
+
+        .finding-card {
+            background: #161b22;
+            border: 1px solid #2d333b;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            overflow: hidden;
+        }
+
+        .finding-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #2d333b;
+            cursor: pointer;
+        }
+
+        .finding-header:hover {
+            background: #1c2129;
+        }
+
+        .finding-title {
+            font-weight: 600;
+            color: #e1e4e8;
+        }
+
+        .finding-location {
+            color: #8b949e;
+            font-size: 0.85rem;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+        }
+
+        .finding-body {
+            padding: 1.5rem;
+        }
+
+        .finding-body h4 {
+            color: #8b949e;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .finding-body h4:first-child {
+            margin-top: 0;
+        }
+
+        .finding-body p {
+            color: #c9d1d9;
+        }
+
+        .taint-chain {
+            background: #1c2129;
+            border: 1px solid #2d333b;
+            border-radius: 4px;
+            padding: 0.75rem 1rem;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            color: #ff7b72;
+            margin-top: 0.5rem;
+            overflow-x: auto;
+        }
+
+        .code-block {
+            background: #0d1117;
+            border: 1px solid #2d333b;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-top: 0.5rem;
+            overflow-x: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.8rem;
+            line-height: 1.5;
+            color: #c9d1d9;
+            white-space: pre;
+        }
+
+        .adversarial-section {
+            margin-top: 1rem;
+            border-top: 1px solid #2d333b;
+            padding-top: 1rem;
+        }
+
+        .fp-argument {
+            background: #1a2332;
+            border-left: 3px solid #58a6ff;
+            padding: 0.75rem 1rem;
+            margin-top: 0.5rem;
+            border-radius: 0 4px 4px 0;
+            color: #8b949e;
+            font-style: italic;
+        }
+
+        .rebuttal {
+            background: #1a2a1a;
+            border-left: 3px solid #56d364;
+            padding: 0.75rem 1rem;
+            margin-top: 0.5rem;
+            border-radius: 0 4px 4px 0;
+            color: #c9d1d9;
+        }
+
+        .patch-section {
+            margin-top: 2rem;
+        }
+
+        .patch-section h2 {
+            color: #58a6ff;
+            margin-bottom: 1.5rem;
+            font-size: 1.3rem;
+        }
+
+        .patch-card {
+            background: #161b22;
+            border: 1px solid #2d333b;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            overflow: hidden;
+        }
+
+        .patch-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #2d333b;
+        }
+
+        .patch-body {
+            padding: 1.5rem;
+        }
+
+        .diff-block {
+            background: #0d1117;
+            border: 1px solid #2d333b;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-top: 0.5rem;
+            overflow-x: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            white-space: pre;
+        }
+
+        .diff-add { color: #56d364; }
+        .diff-del { color: #ff7b72; }
+        .diff-hdr { color: #58a6ff; }
+
+        .footer {
+            border-top: 1px solid #2d333b;
+            padding-top: 1.5rem;
+            margin-top: 3rem;
+            color: #484f58;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+
+        .score-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        .score-bar .bar {
+            flex: 1;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .score-bar .fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .confidence-value {
+            font-size: 0.85rem;
+            color: #8b949e;
+            min-width: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>SecureScan Security Report</h1>
+            <p class="subtitle">
+                Automated security audit of
+                <strong>{{ result.repo_name }}</strong>
+                - {{ result.scan_timestamp.strftime('%B %d, %Y at %H:%M UTC') }}
+            </p>
+
+            <div class="meta-grid">
+                <div class="meta-card">
+                    <div class="label">Repository</div>
+                    <div class="value" style="font-size: 1rem;">{{ result.repo_name }}</div>
+                </div>
+                <div class="meta-card">
+                    <div class="label">Branch / Commit</div>
+                    <div class="value" style="font-size: 1rem;">{{ result.branch }} / {{ result.commit_hash[:8] }}</div>
+                </div>
+                <div class="meta-card">
+                    <div class="label">Files Analyzed</div>
+                    <div class="value">{{ result.files_analyzed }}</div>
+                </div>
+                <div class="meta-card">
+                    <div class="label">Lines of Code</div>
+                    <div class="value">{{ "{:,}".format(result.total_lines) }}</div>
+                </div>
+                <div class="meta-card">
+                    <div class="label">Confirmed Findings</div>
+                    <div class="value" style="color: {% if result.confirmed_findings %}#ff6b6b{% else %}#56d364{% endif %};">
+                        {{ result.confirmed_findings | length }}
+                    </div>
+                </div>
+                <div class="meta-card">
+                    <div class="label">Scan Duration</div>
+                    <div class="value">{{ "%.1f" | format(result.scan_duration_seconds) }}s</div>
+                </div>
+            </div>
+        </div>
+
+        {% if result.executive_summary %}
+        <div class="executive-summary">
+            <h2>Executive Summary</h2>
+            <p>{{ result.executive_summary }}</p>
+        </div>
+        {% endif %}
+
+        {% if result.confirmed_findings %}
+        <div class="findings-section">
+            <h2>Confirmed Vulnerabilities ({{ result.confirmed_findings | length }})</h2>
+
+            {% for finding in result.confirmed_findings %}
+            <div class="finding-card">
+                <div class="finding-header">
+                    <div>
+                        <span class="severity severity-{{ finding.enriched.severity.value }}">
+                            {{ finding.enriched.severity.value }}
+                        </span>
+                        <span class="finding-title">
+                            {{ finding.enriched.raw.vuln_type.value | upper }}
+                        </span>
+                    </div>
+                    <span class="finding-location">
+                        {{ finding.enriched.raw.file_path }}:{{ finding.enriched.raw.line_start }}
+                    </span>
+                </div>
+
+                <div class="finding-body">
+                    <h4>Analysis</h4>
+                    <p>{{ finding.enriched.reasoning }}</p>
+
+                    {% if finding.enriched.taint_chain %}
+                    <h4>Data Flow (Taint Chain)</h4>
+                    <div class="taint-chain">{{ finding.enriched.taint_chain }}</div>
+                    {% endif %}
+
+                    <h4>Code</h4>
+                    <div class="code-block">{{ finding.enriched.raw.code_snippet }}</div>
+
+                    <div style="display: flex; gap: 2rem; margin-top: 1rem;">
+                        <div>
+                            <h4>CVSS Estimate</h4>
+                            <p>{{ "%.1f" | format(finding.enriched.cvss_estimate) }} / 10.0</p>
+                        </div>
+                        <div>
+                            <h4>Exploitability</h4>
+                            <p>{{ finding.enriched.exploitability.value }}</p>
+                        </div>
+                        <div>
+                            <h4>Reachable</h4>
+                            <p>{{ "Yes" if finding.enriched.is_reachable else ("No" if finding.enriched.is_reachable == false else "Unknown") }}</p>
+                        </div>
+                    </div>
+
+                    <h4>Confidence</h4>
+                    <div class="score-bar">
+                        <div class="bar">
+                            <div class="fill" style="width: {{ (finding.final_confidence * 100) | int }}%;
+                                background: {% if finding.final_confidence > 0.8 %}#da3633{% elif finding.final_confidence > 0.6 %}#d29922{% else %}#238636{% endif %};">
+                            </div>
+                        </div>
+                        <span class="confidence-value">{{ "%.0f" | format(finding.final_confidence * 100) }}%</span>
+                    </div>
+
+                    <div class="adversarial-section">
+                        <h4>Adversarial False-Positive Review</h4>
+                        <p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                            The finding was challenged with the strongest false-positive argument.
+                        </p>
+                        <h4 style="color: #58a6ff;">FP Argument</h4>
+                        <div class="fp-argument">{{ finding.fp_argument }}</div>
+                        <h4 style="color: #56d364;">Rebuttal</h4>
+                        <div class="rebuttal">{{ finding.fp_rebuttal }}</div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="executive-summary">
+            <h2>No Confirmed Vulnerabilities</h2>
+            <p>
+                SecureScan analyzed {{ result.files_analyzed }} files
+                ({{ "{:,}".format(result.total_lines) }} lines of code) and
+                found {{ result.raw_findings_count }} initial detection(s).
+                {% if result.raw_findings_count > 0 %}
+                After LLM-powered semantic analysis and adversarial false-positive
+                review, none were confirmed as genuine vulnerabilities.
+                {% else %}
+                No potential vulnerabilities were detected by static analysis.
+                {% endif %}
+            </p>
+        </div>
+        {% endif %}
+
+        {% if patches %}
+        <div class="patch-section">
+            <h2>Remediation Patches ({{ patches | length }})</h2>
+
+            {% for patch in patches %}
+            <div class="patch-card">
+                <div class="patch-header">
+                    <strong>Patch for finding {{ patch.finding_id[:8] }}</strong>
+                    {% if patch.syntax_valid %}
+                    <span style="color: #56d364;">Valid syntax</span>
+                    {% else %}
+                    <span style="color: #d29922;">Review recommended</span>
+                    {% endif %}
+                </div>
+                <div class="patch-body">
+                    <h4>Explanation</h4>
+                    <p>{{ patch.explanation }}</p>
+
+                    <h4>Diff</h4>
+                    <div class="diff-block">{% for line in patch.diff.splitlines() %}{% if line.startswith('+') and not line.startswith('+++') %}<span class="diff-add">{{ line }}</span>
+{% elif line.startswith('-') and not line.startswith('---') %}<span class="diff-del">{{ line }}</span>
+{% elif line.startswith('@@') %}<span class="diff-hdr">{{ line }}</span>
+{% else %}{{ line }}
+{% endif %}{% endfor %}</div>
+
+                    <h4>Files Modified</h4>
+                    <p>{{ patch.files_modified | join(', ') }}</p>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="footer">
+            <p>
+                Generated by <strong>SecureScan</strong> v0.1.0 -
+                AI-powered security audit pipeline using Claude Opus 4.6 + GPT
+            </p>
+            <p style="margin-top: 0.25rem;">
+                This report is for informational purposes. All findings should be
+                reviewed by a qualified security engineer before remediation.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

@@ -55,27 +55,89 @@ def _get_code_context(file_path: Path, line: int, context_lines: int = 5) -> str
         return ""
 
 
-def _classify_vuln_type(rule_id: str, message: str) -> VulnType:
-    """Determine vulnerability type from semgrep rule ID and message."""
+def _classify_vuln_type(rule_id: str, message: str) -> VulnType | None:
+    """Determine vulnerability type from semgrep rule ID and message.
 
+    Returns None if the finding doesn't match any of our target vulnerability
+    types. This is intentional - we only want findings in our scope.
+    """
     rule_lower = rule_id.lower()
     msg_lower = message.lower()
 
+    # Check explicit mappings first
     for keyword, vuln_type in _VULN_TYPE_MAP.items():
-        if keyword in rule_lower or keyword in msg_lower:
+        if keyword in rule_lower:
             return vuln_type
 
-    if any(word in msg_lower for word in ("sql", "query", "injection", "parameterized")):
+    # SQL Injection indicators
+    sqli_keywords = (
+        "sql-injection",
+        "sqli",
+        "sql_injection",
+        "parameterized",
+        "cursor.execute",
+        "db.query",
+        "raw query",
+        "string concatenation in query",
+        "string formatting in query",
+    )
+    if any(keyword in rule_lower or keyword in msg_lower for keyword in sqli_keywords):
         return VulnType.SQLI
-    if any(
-        word in msg_lower
-        for word in ("secret", "password", "api_key", "token", "credential")
-    ):
+
+    # Also classify eval/exec injection as SQLI (code injection, close enough)
+    eval_keywords = ("eval", "exec(", "code injection", "code-injection")
+    if any(keyword in msg_lower for keyword in eval_keywords):
+        return VulnType.SQLI
+
+    # Hardcoded secrets indicators
+    secret_keywords = (
+        "secret",
+        "password",
+        "api.key",
+        "api_key",
+        "apikey",
+        "token",
+        "credential",
+        "private.key",
+        "private_key",
+        "hardcoded",
+        "hard-coded",
+        "hard_coded",
+        "bcrypt",
+        "hash detected",
+    )
+    if any(keyword in rule_lower or keyword in msg_lower for keyword in secret_keywords):
         return VulnType.HARDCODED_SECRET
-    if any(word in msg_lower for word in ("xss", "innerhtml", "document.write", "cross-site")):
+
+    # XSS indicators
+    xss_keywords = (
+        "xss",
+        "cross-site",
+        "cross_site",
+        "innerhtml",
+        "document.write",
+        "dangerouslysetinnerhtml",
+        "reflected",
+        "stored xss",
+        "dom-based",
+    )
+    if any(keyword in rule_lower or keyword in msg_lower for keyword in xss_keywords):
         return VulnType.XSS
 
-    return VulnType.SQLI
+    # If nothing matches, return None - this finding is out of scope
+    return None
+
+
+def _is_in_scope(
+    vuln_type: VulnType | None,
+    target_vuln_types: set[VulnType] | None,
+) -> bool:
+    """Return True when the finding should be included in results."""
+    if vuln_type is None:
+        return False
+    if target_vuln_types and vuln_type not in target_vuln_types:
+        return False
+    return True
 
 
 def run_semgrep(
@@ -172,12 +234,22 @@ def run_semgrep(
         message = result_item.get("extra", {}).get("message", "")
         severity = result_item.get("extra", {}).get("severity", "WARNING")
         file_path = result_item.get("path", "")
+        # Make path relative to repo root
+        try:
+            file_path = str(Path(file_path).relative_to(repo_path))
+        except ValueError:
+            pass  # Already relative or different root
         start_line = result_item.get("start", {}).get("line", 0)
         end_line = result_item.get("end", {}).get("line", start_line)
 
         vuln_type = _classify_vuln_type(rule_id, message)
 
-        if target_vuln_types and vuln_type not in target_vuln_types:
+        # Skip findings that don't match any of our target vuln types
+        if vuln_type is None:
+            continue
+
+        # Filter by specific target vuln types if specified
+        if not _is_in_scope(vuln_type, target_vuln_types):
             continue
 
         abs_path = repo_path / file_path
@@ -201,9 +273,10 @@ def run_semgrep(
         )
         findings.append(finding)
 
+    out_of_scope = len(results_data) - len(findings)
     logger.info(
         f"Semgrep: {len(results_data)} total matches, "
-        f"{len(findings)} in scope -> "
+        f"{len(findings)} in scope ({out_of_scope} filtered out) -> "
         f"{sum(1 for f in findings if f.vuln_type == VulnType.SQLI)} SQLi, "
         f"{sum(1 for f in findings if f.vuln_type == VulnType.HARDCODED_SECRET)} secrets, "
         f"{sum(1 for f in findings if f.vuln_type == VulnType.XSS)} XSS"

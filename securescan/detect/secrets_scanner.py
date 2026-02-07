@@ -86,6 +86,21 @@ SECRET_PATTERNS: list[SecretPattern] = [
         confidence=0.70,
         min_entropy=2.5,
     ),
+    # Bcrypt hash
+    SecretPattern(
+        name="Bcrypt Hash",
+        pattern=re.compile(r"\$2[aby]?\$\d{1,2}\$[./A-Za-z0-9]{53}"),
+        confidence=0.75,
+    ),
+    # Generic base64-encoded key (long, high-entropy)
+    SecretPattern(
+        name="Base64 Encoded Key",
+        pattern=re.compile(
+            r"""(?i)(?:key|token|secret|password)\s*[=:]\s*['"]([A-Za-z0-9+/]{40,}={0,2})['"]"""
+        ),
+        confidence=0.65,
+        min_entropy=3.5,
+    ),
     SecretPattern(
         name="High-Entropy String",
         pattern=re.compile(
@@ -107,7 +122,7 @@ _FP_INDICATORS = re.compile(
 )
 
 _TEST_FILE_INDICATORS = re.compile(
-    r"(?i)(test[_/]|_test\.|\.test\.|spec[_/]|_spec\.|\.spec\.|fixtures?[_/]|mock[_/]|__mocks__)"
+    r"(?i)(test[_/]|_test\.|\.test\.|spec[_/]|_spec\.|\.spec\.|__tests__[_/]|__mocks__[_/]|\.stories\.)"
 )
 
 

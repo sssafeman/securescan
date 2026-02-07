@@ -3,6 +3,7 @@
 import logging
 import re
 import sys
+from pathlib import Path
 
 import click
 
@@ -14,8 +15,6 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for minimal envs
     RichHandler = None
 
 from securescan.config import config
-from securescan.ingest.manifest import build_manifest
-from securescan.ingest.repo import IngestError, clone_repo
 
 _RICH_TAG_RE = re.compile(r"\[/?[a-zA-Z0-9 _-]+\]")
 
@@ -62,12 +61,12 @@ def main(verbose: bool) -> None:
 )
 def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
     """Analyze a GitHub repository for security vulnerabilities."""
-    from securescan.detect.models import Severity, ValidationStatus
-    from securescan.pipeline import PipelineContext, run_pipeline
+    from securescan.detect.models import ValidationStatus
+    from securescan.pipeline import run_pipeline
+    from securescan.report.generator import generate_html_report, generate_json_report
 
     console.print("\n[bold]SecureScan[/bold] - AI-Powered Security Audit\n")
 
-    # Validate config (skip API key check if --skip-llm)
     if not skip_llm:
         errors = config.validate()
         if errors:
@@ -85,10 +84,6 @@ def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
         logger.debug("Full traceback:", exc_info=True)
         sys.exit(1)
 
-    # Keep imported names intentionally for parity with requested interface.
-    del PipelineContext, Severity
-
-    # Display results
     if ctx.scan_result is None:
         console.print("[yellow]No scan results available.[/yellow]")
         sys.exit(1)
@@ -129,9 +124,7 @@ def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
 
     confirmed_count = len(result.confirmed_findings)
     if confirmed_count > 0:
-        console.print(
-            f"\n[bold red]{confirmed_count} confirmed vulnerabilities[/bold red]"
-        )
+        console.print(f"\n[bold red]{confirmed_count} confirmed vulnerabilities[/bold red]")
     elif skip_llm:
         console.print(
             "\n[yellow]LLM analysis was skipped. "
@@ -140,6 +133,19 @@ def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
     else:
         console.print("\n[bold green]No confirmed vulnerabilities.[/bold green]")
 
+    reports_dir = Path("reports")
+    timestamp = result.scan_timestamp.strftime("%Y%m%d_%H%M%S")
+    repo_slug = result.repo_name.replace("/", "_")
+
+    html_path = reports_dir / f"{repo_slug}_{timestamp}.html"
+    json_path = reports_dir / f"{repo_slug}_{timestamp}.json"
+
+    generate_html_report(result, ctx.patches or [], html_path)
+    generate_json_report(result, ctx.patches or [], json_path)
+
+    console.print("\n[bold]Reports saved:[/bold]")
+    console.print(f"  HTML: {html_path}")
+    console.print(f"  JSON: {json_path}")
     console.print()
 
 
