@@ -93,8 +93,8 @@ cp .env.example .env
 ```env
 ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 
-# Optional: override model (default: claude-sonnet-4-5-20250514)
-# OPUS_MODEL=claude-opus-4-6
+# Optional: override model (default: claude-opus-4-6)
+# OPUS_MODEL=claude-sonnet-4-5-20250929
 ```
 
 ### Run a Scan
