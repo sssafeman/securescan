@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 
 from securescan.config import config
+from securescan.detect.models import Language
 
 logger = logging.getLogger(__name__)
 
@@ -16,12 +17,6 @@ class RiskLevel(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
-
-
-class Language(str, Enum):
-    PYTHON = "python"
-    JAVASCRIPT = "javascript"
-    TYPESCRIPT = "typescript"
 
 
 @dataclass
@@ -68,6 +63,12 @@ def _classify_language(path: Path) -> Language | None:
         if ext in (".ts", ".tsx"):
             return Language.TYPESCRIPT
         return Language.JAVASCRIPT
+    if ext in config.go_extensions:
+        return Language.GO
+    if ext in config.rust_extensions:
+        return Language.RUST
+    if ext in config.java_extensions:
+        return Language.JAVA
     return None
 
 

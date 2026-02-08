@@ -81,6 +81,38 @@ DANGEROUS_CALLS_JS = frozenset(
     }
 )
 
+DANGEROUS_CALLS_GO = frozenset(
+    {
+        "exec.Command",
+        "sql.Query",
+        "template.HTML",
+        "os.Exec",
+        "unsafe.Pointer",
+        "database/sql",
+    }
+)
+
+DANGEROUS_CALLS_RUST = frozenset(
+    {
+        "unsafe {",
+        "Command::new",
+        "std::process::Command",
+        "*const",
+        "*mut",
+    }
+)
+
+DANGEROUS_CALLS_JAVA = frozenset(
+    {
+        "Runtime.getRuntime().exec",
+        "ProcessBuilder",
+        "Statement.execute",
+        "ObjectInputStream",
+        "eval(",
+        "ScriptEngine",
+    }
+)
+
 
 @dataclass
 class FunctionDef:
@@ -144,6 +176,11 @@ class ParsedFile:
     @property
     def dangerous_calls(self) -> list[FunctionCall]:
         return [call for call in self.calls if call.is_dangerous]
+
+    @property
+    def function_defs(self) -> list[FunctionDef]:
+        """Compatibility alias for tests that expect `function_defs`."""
+        return self.functions
 
 
 def _read_file(path: Path) -> bytes:
@@ -420,6 +457,65 @@ _IMPORT_JS_RE = re.compile(
     r"""(?:import\s+.*?from\s+['\"]([^'\"]+)['\"]|require\s*\(\s*['\"]([^'\"]+)['\"]\s*\))""",
     re.MULTILINE,
 )
+_GO_FUNC_RE = re.compile(
+    r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(",
+    re.MULTILINE,
+)
+_IMPORT_GO_SINGLE_RE = re.compile(
+    r'^\s*import\s+"([^"]+)"',
+    re.MULTILINE,
+)
+_IMPORT_GO_BLOCK_RE = re.compile(
+    r"^\s*import\s*\((.*?)\)",
+    re.MULTILINE | re.DOTALL,
+)
+_RUST_FUNC_RE = re.compile(
+    r"^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*[<(]",
+    re.MULTILINE,
+)
+_IMPORT_RUST_USE_RE = re.compile(
+    r"^\s*use\s+([^;]+);",
+    re.MULTILINE,
+)
+_IMPORT_RUST_EXTERN_RE = re.compile(
+    r"^\s*extern\s+crate\s+([A-Za-z_]\w*)\s*;",
+    re.MULTILINE,
+)
+_JAVA_CLASS_RE = re.compile(
+    r"^\s*(?:public|private|protected)?\s*class\s+([A-Za-z_]\w*)",
+    re.MULTILINE,
+)
+_JAVA_METHOD_RE = re.compile(
+    r"^\s*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\], ?]+\s+([A-Za-z_]\w*)\s*\(",
+    re.MULTILINE,
+)
+_IMPORT_JAVA_RE = re.compile(
+    r"^\s*import\s+([\w.]+\*?)\s*;",
+    re.MULTILINE,
+)
+
+_DANGEROUS_PATTERN_GO = (
+    re.compile(r"\bexec\.Command\s*\("),
+    re.compile(r"\bsql\.Query\s*\("),
+    re.compile(r"\btemplate\.HTML\s*\("),
+    re.compile(r"\bos\.Exec\s*\("),
+    re.compile(r"\bunsafe\.Pointer\b"),
+)
+
+_DANGEROUS_PATTERN_RUST = (
+    re.compile(r"\bunsafe\s*\{"),
+    re.compile(r"\b(?:std::process::)?Command::new\s*\("),
+    re.compile(r"\*(?:const|mut)\s+"),
+)
+
+_DANGEROUS_PATTERN_JAVA = (
+    re.compile(r"Runtime\.getRuntime\(\)\.exec\s*\("),
+    re.compile(r"\bProcessBuilder\s*\("),
+    re.compile(r"\bStatement\.execute(?:Query|Update)?\s*\("),
+    re.compile(r"\bObjectInputStream\b"),
+    re.compile(r"\beval\s*\("),
+    re.compile(r"\bScriptEngine\b"),
+)
 
 
 def _parse_regex_fallback(file_path: str, abs_path: Path, language: str) -> ParsedFile:
@@ -499,19 +595,188 @@ def _parse_regex_fallback(file_path: str, abs_path: Path, language: str) -> Pars
                 )
             )
 
-    dangerous_calls = DANGEROUS_CALLS_PYTHON if language == "python" else DANGEROUS_CALLS_JS
-    for index, line in enumerate(lines, 1):
-        for danger in dangerous_calls:
-            if danger in line and "(" in line:
-                result.calls.append(
-                    FunctionCall(
-                        name=danger,
+    elif language == "go":
+        for match in _GO_FUNC_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.functions.append(
+                FunctionDef(
+                    name=match.group(1),
+                    file_path=file_path,
+                    line_start=line_num,
+                    line_end=line_num,
+                    parameters=[],
+                    body_text=match.group(0),
+                )
+            )
+
+        for match in _IMPORT_GO_SINGLE_RE.finditer(source_text):
+            module_name = match.group(1)
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.imports.append(
+                ImportStatement(
+                    module=module_name,
+                    alias=None,
+                    file_path=file_path,
+                    line=line_num,
+                )
+            )
+
+        for match in _IMPORT_GO_BLOCK_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            for module_name in re.findall(r'"([^"]+)"', match.group(1)):
+                result.imports.append(
+                    ImportStatement(
+                        module=module_name,
+                        alias=None,
                         file_path=file_path,
-                        line=index,
-                        arguments_text=line.strip(),
-                        is_dangerous=True,
+                        line=line_num,
                     )
                 )
+
+    elif language == "rust":
+        for match in _RUST_FUNC_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.functions.append(
+                FunctionDef(
+                    name=match.group(1),
+                    file_path=file_path,
+                    line_start=line_num,
+                    line_end=line_num,
+                    parameters=[],
+                    body_text=match.group(0),
+                )
+            )
+
+        for match in _IMPORT_RUST_USE_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.imports.append(
+                ImportStatement(
+                    module=match.group(1).strip(),
+                    alias=None,
+                    file_path=file_path,
+                    line=line_num,
+                )
+            )
+
+        for match in _IMPORT_RUST_EXTERN_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.imports.append(
+                ImportStatement(
+                    module=match.group(1),
+                    alias=None,
+                    file_path=file_path,
+                    line=line_num,
+                )
+            )
+
+    elif language == "java":
+        for match in _JAVA_CLASS_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.functions.append(
+                FunctionDef(
+                    name=match.group(1),
+                    file_path=file_path,
+                    line_start=line_num,
+                    line_end=line_num,
+                    parameters=[],
+                    body_text=match.group(0),
+                )
+            )
+
+        for match in _JAVA_METHOD_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.functions.append(
+                FunctionDef(
+                    name=match.group(1),
+                    file_path=file_path,
+                    line_start=line_num,
+                    line_end=line_num,
+                    parameters=[],
+                    body_text=match.group(0),
+                )
+            )
+
+        for match in _IMPORT_JAVA_RE.finditer(source_text):
+            line_num = source_text[: match.start()].count("\n") + 1
+            result.imports.append(
+                ImportStatement(
+                    module=match.group(1),
+                    alias=None,
+                    file_path=file_path,
+                    line=line_num,
+                )
+            )
+
+    if language == "python":
+        dangerous_calls = DANGEROUS_CALLS_PYTHON
+        for index, line in enumerate(lines, 1):
+            for danger in dangerous_calls:
+                if danger in line and "(" in line:
+                    result.calls.append(
+                        FunctionCall(
+                            name=danger,
+                            file_path=file_path,
+                            line=index,
+                            arguments_text=line.strip(),
+                            is_dangerous=True,
+                        )
+                    )
+    elif language in ("javascript", "typescript"):
+        dangerous_calls = DANGEROUS_CALLS_JS
+        for index, line in enumerate(lines, 1):
+            for danger in dangerous_calls:
+                if danger in line and "(" in line:
+                    result.calls.append(
+                        FunctionCall(
+                            name=danger,
+                            file_path=file_path,
+                            line=index,
+                            arguments_text=line.strip(),
+                            is_dangerous=True,
+                        )
+                    )
+    elif language == "go":
+        for index, line in enumerate(lines, 1):
+            for pattern in _DANGEROUS_PATTERN_GO:
+                if pattern.search(line):
+                    match_text = pattern.pattern
+                    result.calls.append(
+                        FunctionCall(
+                            name=match_text,
+                            file_path=file_path,
+                            line=index,
+                            arguments_text=line.strip(),
+                            is_dangerous=True,
+                        )
+                    )
+    elif language == "rust":
+        for index, line in enumerate(lines, 1):
+            for pattern in _DANGEROUS_PATTERN_RUST:
+                if pattern.search(line):
+                    match_text = pattern.pattern
+                    result.calls.append(
+                        FunctionCall(
+                            name=match_text,
+                            file_path=file_path,
+                            line=index,
+                            arguments_text=line.strip(),
+                            is_dangerous=True,
+                        )
+                    )
+    elif language == "java":
+        for index, line in enumerate(lines, 1):
+            for pattern in _DANGEROUS_PATTERN_JAVA:
+                if pattern.search(line):
+                    match_text = pattern.pattern
+                    result.calls.append(
+                        FunctionCall(
+                            name=match_text,
+                            file_path=file_path,
+                            line=index,
+                            arguments_text=line.strip(),
+                            is_dangerous=True,
+                        )
+                    )
 
     return result
 
@@ -524,7 +789,7 @@ def parse_file(file_path: str, abs_path: Path, language: str) -> ParsedFile:
     Args:
         file_path: Path relative to repo root
         abs_path: Absolute filesystem path
-        language: "python", "javascript", or "typescript"
+        language: "python", "javascript", "typescript", "go", "rust", or "java"
 
     Returns:
         ParsedFile with extracted structures
@@ -538,11 +803,9 @@ def parse_file(file_path: str, abs_path: Path, language: str) -> ParsedFile:
             return _parse_python_ts(file_path, abs_path)
         if language in ("javascript", "typescript"):
             return _parse_javascript_ts(file_path, abs_path)
-        return ParsedFile(
-            file_path=file_path,
-            language=language,
-            parse_errors=[f"Unsupported language: {language}"],
-        )
+        if language in ("go", "rust", "java"):
+            return _parse_regex_fallback(file_path, abs_path, language)
+        return _parse_regex_fallback(file_path, abs_path, language)
     except Exception as e:  # pragma: no cover - parser fallback path
         logger.warning(f"tree-sitter parse failed for {file_path}, using regex fallback: {e}")
         return _parse_regex_fallback(file_path, abs_path, language)

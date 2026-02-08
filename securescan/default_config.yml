@@ -6,6 +6,9 @@ checks:
   sqli: true
   xss: true
   hardcoded_secret: true
+  command_injection: true
+  deserialization: true
+  path_traversal: true
   # Future check types can be added here
 
 # Files and directories to exclude from scanning

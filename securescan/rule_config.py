@@ -94,6 +94,9 @@ class RuleConfig:
             "sqli": True,
             "xss": True,
             "hardcoded_secret": True,
+            "command_injection": True,
+            "deserialization": True,
+            "path_traversal": True,
         }
     )
     exclude_paths: list[str] = field(default_factory=list)

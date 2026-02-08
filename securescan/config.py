@@ -71,7 +71,7 @@ class Config:
         "env", ".env", "dist", "build", ".next", ".nuxt",
         "coverage", ".nyc_output", ".pytest_cache", ".mypy_cache",
         "vendor", "third_party", "external", ".tox", "eggs",
-        ".eggs", "bower_components",
+        ".eggs", "bower_components", "target", ".gradle",
     )
 
     # File extensions to analyze
@@ -79,10 +79,19 @@ class Config:
     javascript_extensions: tuple[str, ...] = (
         ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
     )
+    go_extensions: tuple[str, ...] = (".go",)
+    rust_extensions: tuple[str, ...] = (".rs",)
+    java_extensions: tuple[str, ...] = (".java",)
 
     @property
     def all_extensions(self) -> tuple[str, ...]:
-        return self.python_extensions + self.javascript_extensions
+        return (
+            self.python_extensions
+            + self.javascript_extensions
+            + self.go_extensions
+            + self.rust_extensions
+            + self.java_extensions
+        )
 
     def validate(self) -> list[str]:
         """Return list of configuration errors (empty = valid)."""

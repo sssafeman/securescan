@@ -1,9 +1,11 @@
 """Tests for the detection modules."""
 
+from pathlib import Path
 from textwrap import dedent
 
-from securescan.detect.models import DetectionMethod, RawFinding, VulnType
+from securescan.detect.models import DetectionMethod, Language, RawFinding, VulnType
 from securescan.detect.secrets_scanner import scan_file_for_secrets, shannon_entropy
+from securescan.ingest.manifest import _classify_language
 
 
 class TestShannonEntropy:
@@ -113,3 +115,14 @@ class TestRawFinding:
         assert finding_dict["file_path"] == "app/db.py"
         assert finding_dict["confidence"] == 0.9
         assert "id" in finding_dict
+
+
+class TestLanguageDetection:
+    def test_go_file_detected(self):
+        assert _classify_language(Path("main.go")) == Language.GO
+
+    def test_rust_file_detected(self):
+        assert _classify_language(Path("main.rs")) == Language.RUST
+
+    def test_java_file_detected(self):
+        assert _classify_language(Path("Main.java")) == Language.JAVA

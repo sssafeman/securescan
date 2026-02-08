@@ -104,6 +104,152 @@ class TestJavaScriptParsing:
         assert len(result.imports) >= 1 or len(result.calls) >= 1
 
 
+class TestGoParsing:
+    def test_extracts_function_defs(self, tmp_path):
+        code = dedent(
+            """\
+            package main
+
+            import "fmt"
+
+            func Hello(name string) string {
+                return fmt.Sprintf("Hello, %s", name)
+            }
+
+            func (s *Server) HandleRequest(w http.ResponseWriter, r *http.Request) {
+                // handler
+            }
+        """
+        )
+        test_file = tmp_path / "main.go"
+        test_file.write_text(code)
+
+        result = parse_file("main.go", test_file, "go")
+        assert len(result.functions) >= 2
+
+    def test_extracts_imports(self, tmp_path):
+        code = dedent(
+            """\
+            import (
+                "fmt"
+                "net/http"
+                "database/sql"
+            )
+        """
+        )
+        test_file = tmp_path / "main.go"
+        test_file.write_text(code)
+
+        result = parse_file("main.go", test_file, "go")
+        assert len(result.imports) >= 3
+
+    def test_flags_dangerous_calls(self, tmp_path):
+        code = "cmd := exec.Command(userInput)\n"
+        test_file = tmp_path / "main.go"
+        test_file.write_text(code)
+
+        result = parse_file("main.go", test_file, "go")
+        assert len(result.dangerous_calls) >= 1
+
+
+class TestRustParsing:
+    def test_extracts_function_defs(self, tmp_path):
+        code = dedent(
+            """\
+            fn main() {
+                println!("Hello");
+            }
+
+            pub fn process(input: &str) -> Result<(), Error> {
+                Ok(())
+            }
+        """
+        )
+        test_file = tmp_path / "main.rs"
+        test_file.write_text(code)
+
+        result = parse_file("main.rs", test_file, "rust")
+        assert len(result.functions) >= 2
+
+    def test_extracts_imports(self, tmp_path):
+        code = dedent(
+            """\
+            use std::io;
+            use std::process::Command;
+            extern crate serde;
+        """
+        )
+        test_file = tmp_path / "main.rs"
+        test_file.write_text(code)
+
+        result = parse_file("main.rs", test_file, "rust")
+        assert len(result.imports) >= 2
+
+    def test_flags_dangerous_calls(self, tmp_path):
+        code = dedent(
+            """\
+            unsafe {
+                let ptr = &x as *const i32;
+            }
+            let output = Command::new(user_input).output()?;
+        """
+        )
+        test_file = tmp_path / "main.rs"
+        test_file.write_text(code)
+
+        result = parse_file("main.rs", test_file, "rust")
+        assert len(result.dangerous_calls) >= 1
+
+
+class TestJavaParsing:
+    def test_extracts_class_and_method_defs(self, tmp_path):
+        code = dedent(
+            """\
+            public class UserService {
+                public void processRequest(HttpServletRequest req) {
+                    String input = req.getParameter("id");
+                }
+
+                private static String helper(int x) {
+                    return String.valueOf(x);
+                }
+            }
+        """
+        )
+        test_file = tmp_path / "UserService.java"
+        test_file.write_text(code)
+
+        result = parse_file("UserService.java", test_file, "java")
+        assert len(result.functions) >= 2
+
+    def test_extracts_imports(self, tmp_path):
+        code = dedent(
+            """\
+            import java.sql.Connection;
+            import java.sql.Statement;
+            import javax.servlet.http.*;
+        """
+        )
+        test_file = tmp_path / "App.java"
+        test_file.write_text(code)
+
+        result = parse_file("App.java", test_file, "java")
+        assert len(result.imports) >= 3
+
+    def test_flags_dangerous_calls(self, tmp_path):
+        code = dedent(
+            """\
+            Runtime.getRuntime().exec(userCommand);
+            stmt.executeQuery("SELECT * FROM users WHERE id=" + userId);
+        """
+        )
+        test_file = tmp_path / "App.java"
+        test_file.write_text(code)
+
+        result = parse_file("App.java", test_file, "java")
+        assert len(result.dangerous_calls) >= 1
+
+
 class TestParserFallback:
     """Test regex fallback behavior."""
 

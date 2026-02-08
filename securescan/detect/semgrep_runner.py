@@ -191,6 +191,11 @@ def run_semgrep(
         community_configs = [
             "p/python",
             "p/javascript",
+            "p/golang",
+            "p/java",
+            "p/spring",
+            "p/jwt",
+            "p/command-injection",
             "p/secrets",
             "p/owasp-top-ten",
         ]

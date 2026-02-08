@@ -36,6 +36,16 @@ class DetectionMethod(str, Enum):
     LLM = "llm"
 
 
+class Language(str, Enum):
+    PYTHON = "python"
+    JAVASCRIPT = "javascript"
+    TYPESCRIPT = "typescript"
+    GO = "go"
+    RUST = "rust"
+    JAVA = "java"
+    UNKNOWN = "unknown"
+
+
 class Exploitability(str, Enum):
     CONFIRMED = "confirmed"
     LIKELY = "likely"
