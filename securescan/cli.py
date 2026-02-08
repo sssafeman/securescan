@@ -55,11 +55,22 @@ def main(verbose: bool) -> None:
 @click.argument("repo_url")
 @click.option("--branch", "-b", default=None, help="Branch to analyze")
 @click.option(
+    "--config",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to .securescan.yml config file",
+)
+@click.option(
     "--skip-llm",
     is_flag=True,
     help="Skip LLM analysis stages (useful for testing detection only)",
 )
-def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
+def analyze(
+    repo_url: str,
+    branch: str | None,
+    config_path: str | None,
+    skip_llm: bool,
+) -> None:
     """Analyze a GitHub repository for security vulnerabilities."""
     from securescan.detect.models import ValidationStatus
     from securescan.pipeline import run_pipeline
@@ -81,7 +92,12 @@ def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
             sys.exit(1)
 
     try:
-        ctx = run_pipeline(repo_url, branch=branch, skip_llm=skip_llm)
+        ctx = run_pipeline(
+            repo_url,
+            branch=branch,
+            skip_llm=skip_llm,
+            config_path=config_path,
+        )
     except Exception as e:
         console.print(f"[red]Pipeline failed:[/red] {e}")
         logger = logging.getLogger(__name__)

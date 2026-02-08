@@ -36,6 +36,7 @@ from securescan.ingest.manifest import RepoManifest, build_manifest
 from securescan.ingest.repo import RepoInfo, clone_repo
 from securescan.parse.dependencies import DependencyManifest, extract_dependencies
 from securescan.parse.treesitter import ParsedFile, parse_file
+from securescan.rule_config import RuleConfig
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ def run_pipeline(
     repo_url: str,
     branch: str | None = None,
     skip_llm: bool = False,
+    config_path: str | Path | None = None,
 ) -> PipelineContext:
     """Run the full SecureScan pipeline."""
 
@@ -69,6 +71,24 @@ def run_pipeline(
     logger.info("STAGE 1: INGEST")
     logger.info("=" * 60)
     ctx.repo_info = clone_repo(repo_url, branch=branch)
+
+    rule_config_path: Path | None = None
+    if config_path is not None:
+        rule_config_path = Path(config_path)
+    else:
+        repo_rule_config = ctx.repo_info.local_path / ".securescan.yml"
+        if repo_rule_config.exists():
+            rule_config_path = repo_rule_config
+
+    rule_config = RuleConfig.load(rule_config_path)
+    logger.info(
+        "Rule config: min_severity=%s, confidence_threshold=%.2f, "
+        "max_concurrent=%d, max_retries=%d",
+        rule_config.min_severity,
+        rule_config.confidence_threshold,
+        rule_config.max_concurrent,
+        rule_config.max_retries,
+    )
 
     logger.info("=" * 60)
     logger.info("STAGE 2: PARSE")
@@ -154,6 +174,9 @@ def run_pipeline(
             continue
 
         rel = path.relative_to(ctx.repo_info.local_path)
+        rel_str = str(rel)
+        if rule_config.is_path_excluded(rel_str):
+            continue
         if any(part in secrets_skip_dirs or part.startswith(".") for part in rel.parts[:-1]):
             continue
 
@@ -165,11 +188,13 @@ def run_pipeline(
             ".env.production",
             ".env.development",
         ):
-            secrets_file_list.append((str(rel), path))
+            secrets_file_list.append((rel_str, path))
 
     # Also include the manifest files to ensure we don't miss source code
     included_paths = {rel_path for rel_path, _ in secrets_file_list}
     for file_entry in ctx.manifest.files:
+        if rule_config.is_path_excluded(file_entry.relative_path):
+            continue
         if file_entry.relative_path not in included_paths:
             secrets_file_list.append((file_entry.relative_path, file_entry.absolute_path))
 
@@ -179,6 +204,28 @@ def run_pipeline(
         files=file_list,
     )
     ctx.raw_findings.extend(secrets_findings)
+
+    filtered_disabled_checks = 0
+    filtered_excluded_paths = 0
+    filtered_findings: list[RawFinding] = []
+    for finding in ctx.raw_findings:
+        vuln_type = finding.vuln_type.value
+        if not rule_config.is_check_enabled(vuln_type):
+            filtered_disabled_checks += 1
+            continue
+        if rule_config.is_path_excluded(finding.file_path):
+            filtered_excluded_paths += 1
+            continue
+        filtered_findings.append(finding)
+    ctx.raw_findings = filtered_findings
+
+    filtered_total = filtered_disabled_checks + filtered_excluded_paths
+    if filtered_total > 0:
+        logger.info(
+            f"Filtered {filtered_total} raw findings by config "
+            f"({filtered_disabled_checks} disabled checks, "
+            f"{filtered_excluded_paths} excluded paths)"
+        )
 
     # Deduplicate findings on same file+line (keep highest confidence)
     seen: dict[tuple[str, int], RawFinding] = {}
@@ -247,24 +294,44 @@ def run_pipeline(
             findings=ctx.raw_findings,
             digest=digest,
             repo_name=ctx.repo_info.name,
-            max_workers=config.max_concurrent_llm_calls,
+            max_workers=rule_config.max_concurrent,
         )
 
         if not ctx.enriched_findings:
             logger.info("All findings rejected by analysis. Pipeline complete.")
             ctx.validated_findings = []
         else:
-            logger.info("=" * 60)
-            logger.info("STAGE 5: VALIDATE (Adversarial Review)")
-            logger.info("=" * 60)
+            before_severity_filter = len(ctx.enriched_findings)
+            ctx.enriched_findings = [
+                finding
+                for finding in ctx.enriched_findings
+                if rule_config.meets_severity_threshold(finding.severity.value)
+            ]
+            severity_filtered = before_severity_filter - len(ctx.enriched_findings)
+            if severity_filtered > 0:
+                logger.info(
+                    f"Filtered {severity_filtered} analyzed findings below "
+                    f"min_severity={rule_config.min_severity}"
+                )
 
-            ctx.validated_findings = review_findings(
-                client=client,
-                findings=ctx.enriched_findings,
-                digest=digest,
-                confidence_threshold=config.confidence_threshold,
-                max_workers=config.max_concurrent_llm_calls,
-            )
+            if not ctx.enriched_findings:
+                logger.info(
+                    "All findings filtered out by severity threshold. "
+                    "Pipeline complete."
+                )
+                ctx.validated_findings = []
+            else:
+                logger.info("=" * 60)
+                logger.info("STAGE 5: VALIDATE (Adversarial Review)")
+                logger.info("=" * 60)
+
+                ctx.validated_findings = review_findings(
+                    client=client,
+                    findings=ctx.enriched_findings,
+                    digest=digest,
+                    confidence_threshold=rule_config.confidence_threshold,
+                    max_workers=rule_config.max_concurrent,
+                )
 
         confirmed = [finding for finding in (ctx.validated_findings or []) if finding.is_confirmed]
 
@@ -281,7 +348,7 @@ def run_pipeline(
                     client=client,
                     findings=ctx.validated_findings or [],
                     repo_root=ctx.repo_info.local_path,
-                    max_workers=config.max_concurrent_llm_calls,
+                    max_workers=rule_config.max_concurrent,
                 )
             except Exception as e:
                 logger.warning(f"Patch generation failed: {e}")

@@ -1,0 +1,38 @@
+# SecureScan Configuration
+# Place a .securescan.yml in your repo root or pass --config <path>
+
+# Vulnerability checks to enable/disable
+checks:
+  sqli: true
+  xss: true
+  hardcoded_secret: true
+  # Future check types can be added here
+
+# Files and directories to exclude from scanning
+exclude:
+  paths:
+    - "node_modules/"
+    - ".git/"
+    - "vendor/"
+    - "dist/"
+    - "build/"
+  patterns:
+    - "*.min.js"
+    - "*.bundle.js"
+    - "*.test.js"
+    - "*.spec.js"
+
+# Minimum severity to report (low, medium, high, critical)
+# Findings below this threshold are filtered out
+min_severity: low
+
+# Minimum confidence threshold for adversarial review (0.0 - 1.0)
+# Findings below this are marked as likely false positives
+confidence_threshold: 0.7
+
+# LLM settings
+llm:
+  # Max concurrent API calls (1-10)
+  max_concurrent: 5
+  # Max retries per API call
+  max_retries: 3
