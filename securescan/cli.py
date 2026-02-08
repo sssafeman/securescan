@@ -63,7 +63,11 @@ def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
     """Analyze a GitHub repository for security vulnerabilities."""
     from securescan.detect.models import ValidationStatus
     from securescan.pipeline import run_pipeline
-    from securescan.report.generator import generate_html_report, generate_json_report
+    from securescan.report.generator import (
+        generate_html_report,
+        generate_json_report,
+        generate_sarif_report,
+    )
 
     console.print("\n[bold]SecureScan[/bold] - AI-Powered Security Audit\n")
 
@@ -139,13 +143,16 @@ def analyze(repo_url: str, branch: str | None, skip_llm: bool) -> None:
 
     html_path = reports_dir / f"{repo_slug}_{timestamp}.html"
     json_path = reports_dir / f"{repo_slug}_{timestamp}.json"
+    sarif_path = reports_dir / f"{repo_slug}_{timestamp}.sarif.json"
 
     generate_html_report(result, ctx.patches or [], html_path)
     generate_json_report(result, ctx.patches or [], json_path)
+    generate_sarif_report(result, ctx.patches or [], sarif_path)
 
     console.print("\n[bold]Reports saved:[/bold]")
     console.print(f"  HTML: {html_path}")
     console.print(f"  JSON: {json_path}")
+    console.print(f"  SARIF: {sarif_path}")
     console.print()
 
 

@@ -338,6 +338,17 @@ def run_pipeline(
         scan_duration_seconds=time.time() - start_time,
     )
 
+    try:
+        from securescan.report.generator import generate_sarif_report
+
+        sarif_path = generate_sarif_report(
+            result=ctx.scan_result,
+            patches=ctx.patches or [],
+        )
+        logger.info(f"SARIF report saved to {sarif_path}")
+    except Exception as e:
+        logger.warning(f"SARIF report generation failed: {e}")
+
     logger.info("=" * 60)
     logger.info(
         f"PIPELINE COMPLETE: {len(confirmed)} confirmed findings "
