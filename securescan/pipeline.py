@@ -13,6 +13,8 @@ Wires together all stages of the SecureScan pipeline:
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,6 +42,10 @@ from securescan.rule_config import RuleConfig
 
 logger = logging.getLogger(__name__)
 
+_GITHUB_REMOTE_RE = re.compile(
+    r"github\.com[:/](?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+?)(?:\.git)?$"
+)
+
 
 @dataclass
 class PipelineContext:
@@ -57,7 +63,8 @@ class PipelineContext:
 
 
 def run_pipeline(
-    repo_url: str,
+    repo_url: str | None = None,
+    local_path: str | Path | None = None,
     branch: str | None = None,
     skip_llm: bool = False,
     config_path: str | Path | None = None,
@@ -67,10 +74,17 @@ def run_pipeline(
     ctx = PipelineContext()
     start_time = time.time()
 
+    if (repo_url is None) == (local_path is None):
+        raise ValueError("Provide exactly one of repo_url or local_path")
+
     logger.info("=" * 60)
     logger.info("STAGE 1: INGEST")
     logger.info("=" * 60)
-    ctx.repo_info = clone_repo(repo_url, branch=branch)
+    if local_path is not None:
+        ctx.repo_info = _build_local_repo_info(local_path, branch=branch)
+    else:
+        assert repo_url is not None
+        ctx.repo_info = clone_repo(repo_url, branch=branch)
 
     rule_config_path: Path | None = None
     if config_path is not None:
@@ -425,3 +439,65 @@ def run_pipeline(
     logger.info("=" * 60)
 
     return ctx
+
+
+def _run_git_command(repo_path: Path, *args: str) -> str | None:
+    """Run a git command and return stripped stdout when successful."""
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _infer_repo_name_from_remote(remote_url: str | None, local_path: Path) -> str:
+    """Infer repo name from remote URL, fallback to local directory name."""
+    if remote_url:
+        match = _GITHUB_REMOTE_RE.search(remote_url.strip())
+        if match:
+            return f"{match.group('owner')}/{match.group('repo')}"
+    return local_path.name
+
+
+def _build_local_repo_info(
+    local_path: str | Path,
+    branch: str | None = None,
+) -> RepoInfo:
+    """Build RepoInfo from an existing local directory (no clone)."""
+    resolved_path = Path(local_path).expanduser().resolve()
+    if not resolved_path.exists() or not resolved_path.is_dir():
+        raise ValueError(f"Local path does not exist or is not a directory: {local_path}")
+
+    remote_url = _run_git_command(resolved_path, "remote", "get-url", "origin")
+    repo_name = _infer_repo_name_from_remote(remote_url, resolved_path)
+    detected_branch = _run_git_command(resolved_path, "rev-parse", "--abbrev-ref", "HEAD")
+    commit_hash = _run_git_command(resolved_path, "rev-parse", "HEAD")
+    commit_date_raw = _run_git_command(resolved_path, "show", "-s", "--format=%cI", "HEAD")
+
+    commit_date = datetime.now()
+    if commit_date_raw:
+        try:
+            commit_date = datetime.fromisoformat(commit_date_raw.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    info = RepoInfo(
+        name=repo_name,
+        local_path=resolved_path,
+        url=remote_url or resolved_path.as_uri(),
+        branch=branch or detected_branch or "local",
+        commit_hash=commit_hash or "local",
+        commit_date=commit_date,
+        clone_depth=0,
+    )
+    logger.info(
+        f"Using local repository {info.name} @ {info.commit_hash[:8]} "
+        f"({info.branch}, {info.commit_date.isoformat()})"
+    )
+    return info

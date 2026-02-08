@@ -1,0 +1,23 @@
+# .github/workflows/securescan.yml
+# Example: Run SecureScan on every push and PR
+name: SecureScan Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: sssafeman/securescan@main
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

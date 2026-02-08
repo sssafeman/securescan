@@ -1,0 +1,171 @@
+name: "SecureScan Security Audit"
+description: "AI-powered security audit using Claude Opus 4.6. Finds vulnerabilities, generates patches, uploads SARIF results."
+author: "sssafeman"
+
+branding:
+  icon: "shield"
+  color: "red"
+
+inputs:
+  anthropic-api-key:
+    description: "Anthropic API key for LLM analysis"
+    required: true
+  repo-path:
+    description: "Path to the repository to scan (default: current repo)"
+    required: false
+    default: "."
+  config-path:
+    description: "Path to .securescan.yml config file"
+    required: false
+    default: ""
+  skip-llm:
+    description: "Skip LLM analysis (detection only)"
+    required: false
+    default: "false"
+  min-severity:
+    description: "Minimum severity to report (low, medium, high, critical)"
+    required: false
+    default: ""
+  upload-sarif:
+    description: "Upload SARIF results to GitHub Security tab"
+    required: false
+    default: "true"
+  model:
+    description: "Claude model to use (claude-opus-4-6, claude-sonnet-4-5-20250929)"
+    required: false
+    default: ""
+
+outputs:
+  sarif-file:
+    description: "Path to the generated SARIF report"
+    value: ${{ steps.scan.outputs.sarif-file }}
+  html-report:
+    description: "Path to the generated HTML report"
+    value: ${{ steps.scan.outputs.html-report }}
+  json-report:
+    description: "Path to the generated JSON report"
+    value: ${{ steps.scan.outputs.json-report }}
+  findings-count:
+    description: "Number of confirmed findings"
+    value: ${{ steps.scan.outputs.findings-count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install SecureScan
+      shell: bash
+      run: |
+        pip install -r "${{ github.action_path }}/requirements.txt"
+        pip install -e "${{ github.action_path }}"
+
+    - name: Run SecureScan
+      id: scan
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: |
+        set -euo pipefail
+
+        REPO_PATH="${{ inputs.repo-path }}"
+        if [ ! -d "$REPO_PATH" ]; then
+          echo "Repository path does not exist: $REPO_PATH" >&2
+          exit 1
+        fi
+
+        if [ -n "${{ inputs.model }}" ]; then
+          export OPUS_MODEL="${{ inputs.model }}"
+        fi
+
+        ARGS=()
+        if [ "${{ inputs.skip-llm }}" = "true" ]; then
+          ARGS+=(--skip-llm)
+        fi
+
+        cd "$REPO_PATH"
+
+        EFFECTIVE_CONFIG=""
+        if [ -n "${{ inputs.min-severity }}" ]; then
+          EFFECTIVE_CONFIG="$(mktemp)"
+          SOURCE_CONFIG=""
+          if [ -n "${{ inputs.config-path }}" ]; then
+            SOURCE_CONFIG="${{ inputs.config-path }}"
+          fi
+
+          python - "$SOURCE_CONFIG" "$EFFECTIVE_CONFIG" "${{ inputs.min-severity }}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+source = Path(sys.argv[1]) if sys.argv[1] else None
+target = Path(sys.argv[2])
+min_severity = sys.argv[3]
+
+data = {}
+if source is not None and source.exists():
+    try:
+        loaded = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except Exception:
+        loaded = {}
+    if isinstance(loaded, dict):
+        data = loaded
+
+data["min_severity"] = min_severity
+target.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+PY
+          ARGS+=(--config "$EFFECTIVE_CONFIG")
+        elif [ -n "${{ inputs.config-path }}" ]; then
+          ARGS+=(--config "${{ inputs.config-path }}")
+        fi
+
+        securescan analyze-local . "${ARGS[@]}"
+
+        SARIF_FILE_REL="$(ls -t reports/*.sarif.json 2>/dev/null | head -1 || true)"
+        HTML_FILE_REL="$(ls -t reports/*.html 2>/dev/null | head -1 || true)"
+        JSON_FILE_REL="$(ls -t reports/*.json 2>/dev/null | grep -v sarif | head -1 || true)"
+
+        SARIF_FILE=""
+        HTML_FILE=""
+        JSON_FILE=""
+        if [ -n "$SARIF_FILE_REL" ]; then
+          SARIF_FILE="$(pwd)/$SARIF_FILE_REL"
+        fi
+        if [ -n "$HTML_FILE_REL" ]; then
+          HTML_FILE="$(pwd)/$HTML_FILE_REL"
+        fi
+        if [ -n "$JSON_FILE_REL" ]; then
+          JSON_FILE="$(pwd)/$JSON_FILE_REL"
+        fi
+
+        echo "sarif-file=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        echo "html-report=$HTML_FILE" >> "$GITHUB_OUTPUT"
+        echo "json-report=$JSON_FILE" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$JSON_FILE" ]; then
+          COUNT="$(python -c "import json; d=json.load(open('$JSON_FILE', encoding='utf-8')); print(len(d.get('confirmed_findings', [])))" 2>/dev/null || echo "0")"
+          echo "findings-count=$COUNT" >> "$GITHUB_OUTPUT"
+        else
+          echo "findings-count=0" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload SARIF to GitHub Security
+      if: inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-file != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: securescan
+
+    - name: Upload reports as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: securescan-reports
+        path: |
+          ${{ inputs.repo-path }}/reports/*.html
+          ${{ inputs.repo-path }}/reports/*.json
+          ${{ inputs.repo-path }}/reports/*.sarif.json
+        retention-days: 30

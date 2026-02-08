@@ -44,67 +44,16 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-@click.group()
-@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
-def main(verbose: bool) -> None:
-    """SecureScan - AI-powered security audit pipeline."""
-    setup_logging(verbose)
-
-
-@main.command()
-@click.argument("repo_url")
-@click.option("--branch", "-b", default=None, help="Branch to analyze")
-@click.option(
-    "--config",
-    type=click.Path(exists=True),
-    default=None,
-    help="Path to .securescan.yml config file",
-)
-@click.option(
-    "--skip-llm",
-    is_flag=True,
-    help="Skip LLM analysis stages (useful for testing detection only)",
-)
-def analyze(
-    repo_url: str,
-    branch: str | None,
-    config_path: str | None,
-    skip_llm: bool,
-) -> None:
-    """Analyze a GitHub repository for security vulnerabilities."""
+def _render_and_save_reports(ctx: object, skip_llm: bool) -> None:
+    """Print scan results and save reports for a completed pipeline context."""
     from securescan.detect.models import ValidationStatus
-    from securescan.pipeline import run_pipeline
     from securescan.report.generator import (
         generate_html_report,
         generate_json_report,
         generate_sarif_report,
     )
 
-    console.print("\n[bold]SecureScan[/bold] - AI-Powered Security Audit\n")
-
-    if not skip_llm:
-        errors = config.validate()
-        if errors:
-            for err in errors:
-                console.print(f"[red]Config error:[/red] {err}")
-            console.print("\nCopy .env.example to .env and fill in your API keys.")
-            console.print("Or use --skip-llm to test detection only.")
-            sys.exit(1)
-
-    try:
-        ctx = run_pipeline(
-            repo_url,
-            branch=branch,
-            skip_llm=skip_llm,
-            config_path=config_path,
-        )
-    except Exception as e:
-        console.print(f"[red]Pipeline failed:[/red] {e}")
-        logger = logging.getLogger(__name__)
-        logger.debug("Full traceback:", exc_info=True)
-        sys.exit(1)
-
-    if ctx.scan_result is None:
+    if getattr(ctx, "scan_result", None) is None:
         console.print("[yellow]No scan results available.[/yellow]")
         sys.exit(1)
 
@@ -170,6 +119,107 @@ def analyze(
     console.print(f"  JSON: {json_path}")
     console.print(f"  SARIF: {sarif_path}")
     console.print()
+
+
+@click.group()
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
+def main(verbose: bool) -> None:
+    """SecureScan - AI-powered security audit pipeline."""
+    setup_logging(verbose)
+
+
+@main.command()
+@click.argument("repo_url")
+@click.option("--branch", "-b", default=None, help="Branch to analyze")
+@click.option(
+    "--config",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to .securescan.yml config file",
+)
+@click.option(
+    "--skip-llm",
+    is_flag=True,
+    help="Skip LLM analysis stages (useful for testing detection only)",
+)
+def analyze(
+    repo_url: str,
+    branch: str | None,
+    config_path: str | None,
+    skip_llm: bool,
+) -> None:
+    """Analyze a GitHub repository for security vulnerabilities."""
+    from securescan.pipeline import run_pipeline
+
+    console.print("\n[bold]SecureScan[/bold] - AI-Powered Security Audit\n")
+
+    if not skip_llm:
+        errors = config.validate()
+        if errors:
+            for err in errors:
+                console.print(f"[red]Config error:[/red] {err}")
+            console.print("\nCopy .env.example to .env and fill in your API keys.")
+            console.print("Or use --skip-llm to test detection only.")
+            sys.exit(1)
+
+    try:
+        ctx = run_pipeline(
+            repo_url=repo_url,
+            branch=branch,
+            skip_llm=skip_llm,
+            config_path=config_path,
+        )
+    except Exception as e:
+        console.print(f"[red]Pipeline failed:[/red] {e}")
+        logger = logging.getLogger(__name__)
+        logger.debug("Full traceback:", exc_info=True)
+        sys.exit(1)
+
+    _render_and_save_reports(ctx, skip_llm=skip_llm)
+
+
+@main.command("analyze-local")
+@click.argument("path", type=click.Path(exists=True))
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to .securescan.yml",
+)
+@click.option(
+    "--skip-llm",
+    is_flag=True,
+    help="Skip LLM analysis stages (useful for testing detection only)",
+)
+def analyze_local(path: str, config_path: str | None, skip_llm: bool) -> None:
+    """Analyze a local repository directory for security vulnerabilities."""
+    from securescan.pipeline import run_pipeline
+
+    console.print("\n[bold]SecureScan[/bold] - AI-Powered Security Audit\n")
+
+    if not skip_llm:
+        errors = config.validate()
+        if errors:
+            for err in errors:
+                console.print(f"[red]Config error:[/red] {err}")
+            console.print("\nCopy .env.example to .env and fill in your API keys.")
+            console.print("Or use --skip-llm to test detection only.")
+            sys.exit(1)
+
+    try:
+        ctx = run_pipeline(
+            local_path=path,
+            skip_llm=skip_llm,
+            config_path=config_path,
+        )
+    except Exception as e:
+        console.print(f"[red]Pipeline failed:[/red] {e}")
+        logger = logging.getLogger(__name__)
+        logger.debug("Full traceback:", exc_info=True)
+        sys.exit(1)
+
+    _render_and_save_reports(ctx, skip_llm=skip_llm)
 
 
 @main.command()
