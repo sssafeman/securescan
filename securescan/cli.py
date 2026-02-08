@@ -142,11 +142,18 @@ def main(verbose: bool) -> None:
     is_flag=True,
     help="Skip LLM analysis stages (useful for testing detection only)",
 )
+@click.option(
+    "--diff",
+    "diff_base",
+    default=None,
+    help="Only scan files changed vs this git ref (e.g., main, origin/main, HEAD~3)",
+)
 def analyze(
     repo_url: str,
     branch: str | None,
     config_path: str | None,
     skip_llm: bool,
+    diff_base: str | None,
 ) -> None:
     """Analyze a GitHub repository for security vulnerabilities."""
     from securescan.pipeline import run_pipeline
@@ -168,6 +175,7 @@ def analyze(
             branch=branch,
             skip_llm=skip_llm,
             config_path=config_path,
+            diff_base=diff_base,
         )
     except Exception as e:
         console.print(f"[red]Pipeline failed:[/red] {e}")
@@ -192,7 +200,18 @@ def analyze(
     is_flag=True,
     help="Skip LLM analysis stages (useful for testing detection only)",
 )
-def analyze_local(path: str, config_path: str | None, skip_llm: bool) -> None:
+@click.option(
+    "--diff",
+    "diff_base",
+    default=None,
+    help="Only scan files changed vs this git ref (e.g., main, origin/main, HEAD~3)",
+)
+def analyze_local(
+    path: str,
+    config_path: str | None,
+    skip_llm: bool,
+    diff_base: str | None,
+) -> None:
     """Analyze a local repository directory for security vulnerabilities."""
     from securescan.pipeline import run_pipeline
 
@@ -212,6 +231,7 @@ def analyze_local(path: str, config_path: str | None, skip_llm: bool) -> None:
             local_path=path,
             skip_llm=skip_llm,
             config_path=config_path,
+            diff_base=diff_base,
         )
     except Exception as e:
         console.print(f"[red]Pipeline failed:[/red] {e}")

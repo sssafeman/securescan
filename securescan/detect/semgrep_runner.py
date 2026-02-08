@@ -145,6 +145,7 @@ def run_semgrep(
     custom_rules_dir: Path | None = None,
     use_community_rules: bool = True,
     target_vuln_types: set[VulnType] | None = None,
+    target_files: list[str] | None = None,
 ) -> list[RawFinding]:
     """Run semgrep against a repository and return findings.
 
@@ -153,6 +154,7 @@ def run_semgrep(
         custom_rules_dir: Path to directory containing custom .yaml rules
         use_community_rules: Whether to include semgrep community rulesets
         target_vuln_types: Only return findings matching these types (None = all)
+        target_files: Relative file paths to scan (None = entire repo)
 
     Returns:
         List of RawFinding objects
@@ -200,9 +202,25 @@ def run_semgrep(
         logger.warning("No semgrep configs available. Skipping semgrep analysis.")
         return []
 
-    cmd.append(str(repo_path))
+    if target_files is None:
+        cmd.append(str(repo_path))
+        logger.info(f"Running semgrep with {configs_added} config(s)...")
+    else:
+        scan_targets: list[str] = []
+        for relative in target_files:
+            target_path = repo_path / relative
+            if target_path.exists() and target_path.is_file():
+                scan_targets.append(str(target_path))
 
-    logger.info(f"Running semgrep with {configs_added} config(s)...")
+        if not scan_targets:
+            logger.info("Semgrep: no target files in scope, skipping semgrep analysis.")
+            return []
+
+        cmd.extend(scan_targets)
+        logger.info(
+            f"Running semgrep with {configs_added} config(s) on "
+            f"{len(scan_targets)} target files..."
+        )
 
     try:
         result = subprocess.run(

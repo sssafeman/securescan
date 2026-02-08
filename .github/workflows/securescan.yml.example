@@ -1,5 +1,3 @@
-# .github/workflows/securescan.yml
-# Example: Run SecureScan on every push and PR
 name: SecureScan Security Audit
 
 on:
@@ -17,7 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for diff
 
       - uses: sssafeman/securescan@main
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # On PRs, only scan changed files for speed
+          diff-base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}

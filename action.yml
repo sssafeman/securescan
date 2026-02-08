@@ -30,6 +30,10 @@ inputs:
     description: "Upload SARIF results to GitHub Security tab"
     required: false
     default: "true"
+  diff-base:
+    description: "Git ref to diff against for PR scanning (e.g., origin/main). If set, only changed files are scanned."
+    required: false
+    default: ""
   model:
     description: "Claude model to use (claude-opus-4-6, claude-sonnet-4-5-20250929)"
     required: false
@@ -84,6 +88,9 @@ runs:
         ARGS=()
         if [ "${{ inputs.skip-llm }}" = "true" ]; then
           ARGS+=(--skip-llm)
+        fi
+        if [ -n "${{ inputs.diff-base }}" ]; then
+          ARGS+=(--diff "${{ inputs.diff-base }}")
         fi
 
         cd "$REPO_PATH"

@@ -25,6 +25,7 @@ from securescan.analyze.codebase_digest import build_digest
 from securescan.analyze.opus_client import OpusClient
 from securescan.analyze.vulnerability_analyzer import analyze_findings
 from securescan.config import config
+from securescan.diff import get_changed_files
 from securescan.detect.models import (
     EnrichedFinding,
     Patch,
@@ -45,6 +46,40 @@ logger = logging.getLogger(__name__)
 _GITHUB_REMOTE_RE = re.compile(
     r"github\.com[:/](?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+?)(?:\.git)?$"
 )
+
+
+def _normalize_path(path: str) -> str:
+    normalized = Path(path).as_posix()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized.startswith("/"):
+        normalized = normalized[1:]
+    return normalized
+
+
+def _scoped_manifest(manifest: RepoManifest, scoped_files: list) -> RepoManifest:
+    """Return a new manifest with file list restricted to scoped_files."""
+    language_breakdown: dict[str, int] = {}
+    risk_breakdown: dict[str, int] = {}
+    for file_entry in scoped_files:
+        language_breakdown[file_entry.language.value] = (
+            language_breakdown.get(file_entry.language.value, 0) + 1
+        )
+        risk_breakdown[file_entry.risk_level.value] = (
+            risk_breakdown.get(file_entry.risk_level.value, 0) + 1
+        )
+
+    filtered_out = max(0, manifest.total_files_included - len(scoped_files))
+    return RepoManifest(
+        files=scoped_files,
+        total_files_discovered=manifest.total_files_discovered,
+        total_files_included=len(scoped_files),
+        total_files_excluded=manifest.total_files_excluded + filtered_out,
+        total_lines=sum(file_entry.line_count for file_entry in scoped_files),
+        total_estimated_tokens=sum(file_entry.estimated_tokens for file_entry in scoped_files),
+        language_breakdown=language_breakdown,
+        risk_breakdown=risk_breakdown,
+    )
 
 
 @dataclass
@@ -68,6 +103,7 @@ def run_pipeline(
     branch: str | None = None,
     skip_llm: bool = False,
     config_path: str | Path | None = None,
+    diff_base: str | None = None,
 ) -> PipelineContext:
     """Run the full SecureScan pipeline."""
 
@@ -110,6 +146,22 @@ def run_pipeline(
     ctx.manifest = build_manifest(ctx.repo_info.local_path)
     ctx.dependencies = extract_dependencies(ctx.repo_info.local_path)
 
+    changed_files: set[str] | None = None
+    if diff_base:
+        changed_list = get_changed_files(ctx.repo_info.local_path, diff_base)
+        changed_files = {_normalize_path(path) for path in changed_list}
+        before_count = len(ctx.manifest.files)
+        scoped_files = [
+            file_entry
+            for file_entry in ctx.manifest.files
+            if _normalize_path(file_entry.relative_path) in changed_files
+        ]
+        ctx.manifest = _scoped_manifest(ctx.manifest, scoped_files)
+        logger.info(
+            f"Diff filter: {len(ctx.manifest.files)}/{before_count} files in scope "
+            f"(changed vs {diff_base})"
+        )
+
     ctx.parsed_files = {}
     for file_entry in ctx.manifest.files:
         parsed = parse_file(
@@ -135,9 +187,16 @@ def run_pipeline(
     if not semgrep_rules_dir.exists():
         semgrep_rules_dir = Path("semgrep_rules")
 
+    semgrep_targets: list[str] | None = None
+    if changed_files is not None:
+        semgrep_targets = sorted(
+            path for path in changed_files if not rule_config.is_path_excluded(path)
+        )
+
     semgrep_findings = run_semgrep(
         repo_path=ctx.repo_info.local_path,
         custom_rules_dir=semgrep_rules_dir if semgrep_rules_dir.exists() else None,
+        target_files=semgrep_targets,
     )
     ctx.raw_findings.extend(semgrep_findings)
 
@@ -189,6 +248,9 @@ def run_pipeline(
 
         rel = path.relative_to(ctx.repo_info.local_path)
         rel_str = str(rel)
+        rel_norm = _normalize_path(rel_str)
+        if changed_files is not None and rel_norm not in changed_files:
+            continue
         if rule_config.is_path_excluded(rel_str):
             continue
         if any(part in secrets_skip_dirs or part.startswith(".") for part in rel.parts[:-1]):
@@ -207,6 +269,8 @@ def run_pipeline(
     # Also include the manifest files to ensure we don't miss source code
     included_paths = {rel_path for rel_path, _ in secrets_file_list}
     for file_entry in ctx.manifest.files:
+        if changed_files is not None and _normalize_path(file_entry.relative_path) not in changed_files:
+            continue
         if rule_config.is_path_excluded(file_entry.relative_path):
             continue
         if file_entry.relative_path not in included_paths:
