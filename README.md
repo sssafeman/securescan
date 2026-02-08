@@ -14,7 +14,7 @@ SecureScan combines static analysis with LLM-powered semantic reasoning to find 
 SecureScan runs a 7-stage pipeline on any GitHub repository:
 
 ```
-GitHub Repo URL
+GitHub Repo URL or Local Path
      │
      ▼
 ┌─────────────────────────────────────────────────────────┐
@@ -24,7 +24,7 @@ GitHub Repo URL
 │  Stage 4: ANALYZE    LLM semantic vulnerability analysis│
 │  Stage 5: VALIDATE   Adversarial false-positive review  │
 │  Stage 6: REMEDIATE  Auto-generate code patches         │
-│  Stage 7: REPORT     HTML + JSON security report        │
+│  Stage 7: REPORT     HTML + JSON + SARIF reports        │
 └─────────────────────────────────────────────────────────┘
      │
      ▼
@@ -103,14 +103,32 @@ ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 ### Run a Scan
 
 ```bash
-# Full pipeline with LLM analysis
+# Full pipeline — clone and analyze a GitHub repo
 securescan analyze https://github.com/OWASP/NodeGoat
+
+# Scan a local directory (no clone)
+securescan analyze-local ./my-project
 
 # Detection only (no API key needed)
 securescan analyze https://github.com/OWASP/NodeGoat --skip-llm
+
+# PR-level diff scan — only analyze changed files
+securescan analyze-local . --diff origin/main
 ```
 
-Reports are saved to `reports/` as both HTML and JSON.
+Reports are saved to `reports/` as HTML, JSON, and SARIF.
+
+---
+
+## Language Support
+
+| Language | Parser | Semgrep Rules | Detection |
+|----------|--------|---------------|-----------|
+| **Python** | tree-sitter + regex | `p/python` | `eval()`, `exec()`, secrets, SQL injection |
+| **JavaScript/TypeScript** | tree-sitter + regex | `p/javascript` | XSS, injection, insecure cookies |
+| **Go** | Regex | `p/golang` | `exec.Command`, raw SQL, `unsafe.Pointer` |
+| **Java** | Regex | `p/java`, `p/spring` | `Runtime.exec`, deserialization, SSRF, XXE |
+| **Rust** | Regex | LLM analysis | `unsafe` blocks, `Command::new`, raw pointers |
 
 ---
 
@@ -118,11 +136,92 @@ Reports are saved to `reports/` as both HTML and JSON.
 
 | Category | Detection Method | Examples |
 |----------|-----------------|----------|
-| **Code Injection** | Semgrep + LLM | `eval()`, `exec()`, server-side JS injection |
+| **Code Injection** | Semgrep + LLM | `eval()`, `exec()`, `exec.Command`, `Runtime.exec` |
+| **SQL Injection** | Semgrep + LLM | String interpolation in queries, raw `sql.Query` |
+| **XSS** | Semgrep + LLM | Missing httpOnly, innerHTML, reflected input, template injection |
 | **Hardcoded Secrets** | Regex + entropy + LLM | API keys, private keys, tokens, passwords |
-| **XSS** | Semgrep + LLM | Missing httpOnly, innerHTML, reflected input |
+| **Command Injection** | Semgrep + LLM | Shell execution with user input |
+| **Deserialization** | Semgrep + LLM | `ObjectInputStream`, unsafe unmarshalling |
+| **Path Traversal** | Semgrep + LLM | Unsanitized file path construction |
 
 The LLM layer adds semantic understanding on top of static detection — it traces taint chains, checks if sanitization exists, and evaluates whether findings are reachable from user input.
+
+---
+
+## Custom Configuration
+
+Create a `.securescan.yml` in your repo root or pass `--config <path>`:
+
+```yaml
+# Enable/disable specific checks
+checks:
+  sqli: true
+  xss: true
+  hardcoded_secret: true
+  command_injection: true
+  deserialization: true
+  path_traversal: true
+
+# Exclude files and directories
+exclude:
+  paths:
+    - "node_modules/"
+    - "vendor/"
+    - "dist/"
+  patterns:
+    - "*.min.js"
+    - "*.test.js"
+
+# Minimum severity to report (low, medium, high, critical)
+min_severity: low
+
+# Minimum confidence for adversarial review
+confidence_threshold: 0.7
+
+# LLM concurrency settings
+llm:
+  max_concurrent: 5
+  max_retries: 3
+```
+
+---
+
+## GitHub Actions
+
+SecureScan ships as a reusable GitHub Action. Add it to any repo:
+
+```yaml
+# .github/workflows/securescan.yml
+name: SecureScan Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for diff scanning
+
+      - uses: sssafeman/securescan@main
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # On PRs, only scan changed files
+          diff-base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+```
+
+SARIF results are automatically uploaded to the GitHub Security tab. Reports are available as workflow artifacts.
+
+See `.github/workflows/securescan.yml.example` for the full example.
 
 ---
 
@@ -134,7 +233,8 @@ securescan/
 │   ├── repo.py      # Repository cloning and management
 │   └── manifest.py  # File manifest with risk scoring
 ├── parse/           # AST analysis
-│   ├── parser.py    # tree-sitter / regex fallback parser
+│   ├── treesitter.py # tree-sitter + regex fallback parser
+│   ├── parser.py    # Regex parser helpers (Go, Rust, Java)
 │   └── dependencies.py  # Dependency extraction
 ├── detect/          # Static analysis
 │   ├── semgrep_runner.py  # Semgrep integration
@@ -148,9 +248,11 @@ securescan/
 ├── remediate/       # Patch generation
 │   └── patch_generator.py  # LLM-powered code fix generation
 ├── report/          # Report generation
-│   ├── generator.py      # HTML + JSON report builder
+│   ├── generator.py      # HTML + JSON + SARIF report builder
 │   └── templates/
 │       └── report.html   # Dark-theme HTML template
+├── diff.py          # Git diff utilities for PR scanning
+├── rule_config.py   # YAML rule configuration loader
 ├── pipeline.py      # 7-stage orchestrator
 ├── cli.py           # Click CLI interface
 └── config.py        # Configuration management
@@ -192,6 +294,8 @@ For confirmed vulnerabilities, the LLM generates:
 - Plain-English explanation of what was changed and why
 - Syntax validation of the generated fix
 
+All LLM stages run in parallel (configurable up to 10 concurrent calls) for fast scans.
+
 ---
 
 ## Cost
@@ -202,14 +306,14 @@ Typical scan costs with Claude Opus 4.6:
 |----------------|----------|-----------|--------|-----------|
 | Small (3K LOC) | 8 raw → 4 confirmed | 18 | ~49K | ~$1.50 |
 
-Using Claude Sonnet is ~5x cheaper (~$0.30/scan) with comparable analysis quality for most cases.
+Using Claude Sonnet is ~5x cheaper (~$0.30/scan) with comparable analysis quality for most cases. Diff scanning on PRs reduces costs further by only analyzing changed files.
 
 ---
 
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (67 tests)
 pytest tests/ -v
 
 # Detection only (no API key needed)
@@ -218,31 +322,21 @@ securescan analyze https://github.com/pallets/flask --skip-llm
 
 ---
 
-## Roadmap
-
-- [ ] Parallel LLM calls for faster scans
-- [ ] Support for more languages (Go, Rust, Java)
-- [ ] GitHub Actions integration
-- [ ] PR-level diff scanning (scan only changed files)
-- [ ] Custom rule configuration
-- [ ] SARIF output format
-
----
-
 ## Tech Stack
 
 - **Claude Opus 4.6** — Codebase analysis, vulnerability reasoning, adversarial review, patch generation
 - **Semgrep** — Static analysis rule engine
-- **tree-sitter** — AST parsing (with regex fallback)
+- **tree-sitter** — AST parsing (with regex fallback for Go, Rust, Java)
 - **Rich** — Terminal output formatting
 - **Jinja2** — HTML report templating
 - **Click** — CLI framework
+- **PyYAML** — Rule configuration
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
 
 ---
 
