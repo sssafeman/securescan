@@ -85,7 +85,7 @@ def _classify_vuln_type(rule_id: str, message: str) -> VulnType | None:
         return VulnType.SQLI
 
     # Also classify eval/exec injection as SQLI (code injection, close enough)
-    eval_keywords = ("eval", "exec(", "code injection", "code-injection")
+    eval_keywords = ("eval", "exec(", "code injection", "code-injection", "remote code")
     if any(keyword in msg_lower for keyword in eval_keywords):
         return VulnType.SQLI
 

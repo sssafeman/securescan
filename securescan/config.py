@@ -50,6 +50,9 @@ class Config:
         )
     )
     opus_max_tokens: int = 8192
+    max_concurrent_llm_calls: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CONCURRENT_LLM", "5"))
+    )
     codex_model: str = "gpt-5.3-codex"  # Verify exact model string
 
     # File classification

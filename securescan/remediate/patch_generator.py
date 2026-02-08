@@ -11,10 +11,12 @@ import difflib
 import logging
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from securescan.detect.models import Patch, ValidatedFinding
 from securescan.analyze.opus_client import LLMResponse, OpusClient
+from securescan.config import config
+from securescan.detect.models import Patch, ValidatedFinding
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +211,7 @@ def generate_patches(
     client: OpusClient,
     findings: list[ValidatedFinding],
     repo_root: Path,
+    max_workers: int | None = None,
 ) -> list[Patch]:
     """Generate patches for all confirmed findings."""
     confirmed = [finding for finding in findings if finding.is_confirmed]
@@ -218,22 +221,40 @@ def generate_patches(
         return []
 
     logger.info(f"Generating patches for {len(confirmed)} confirmed findings...")
-    patches: list[Patch] = []
+    worker_count = max(1, max_workers or config.max_concurrent_llm_calls)
+    patch_results: list[Patch | None] = [None] * len(confirmed)
 
-    for index, finding in enumerate(confirmed, 1):
-        raw = finding.enriched.raw
-        logger.info(
-            f"  [{index}/{len(confirmed)}] Patching {raw.vuln_type.value} in "
-            f"{raw.file_path}:{raw.line_start}"
-        )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_idx = {}
+        for idx, finding in enumerate(confirmed):
+            raw = finding.enriched.raw
+            logger.info(
+                f"  [{idx + 1}/{len(confirmed)}] Patching {raw.vuln_type.value} in "
+                f"{raw.file_path}:{raw.line_start}"
+            )
+            future = executor.submit(generate_patch, client, finding, repo_root)
+            future_to_idx[future] = idx
 
-        patch = generate_patch(client, finding, repo_root)
-        if patch:
-            patches.append(patch)
-            status = "valid" if patch.syntax_valid else "syntax issues"
-            logger.info(f"    -> Patch generated ({status})")
-        else:
-            logger.info("    -> Patch generation failed")
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            finding = confirmed[idx]
+            raw = finding.enriched.raw
+            finding_id = f"[{raw.file_path}:{raw.line_start}]"
+
+            try:
+                patch = future.result()
+            except Exception as exc:
+                logger.error(f"{finding_id} Patch generation failed: {exc}")
+                patch = None
+
+            patch_results[idx] = patch
+            if patch:
+                status = "valid" if patch.syntax_valid else "syntax issues"
+                logger.info(f"    {finding_id} -> Patch generated ({status})")
+            else:
+                logger.info(f"    {finding_id} -> Patch generation failed")
+
+    patches = [patch for patch in patch_results if patch is not None]
 
     logger.info(
         f"Patch generation complete: {len(patches)}/{len(confirmed)} successful"

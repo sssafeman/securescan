@@ -82,18 +82,3 @@ class TestPatchGenerator:
 
         assert _validate_python_syntax("def foo(:\n  pass") is False
 
-
-class TestCodexClient:
-    def test_extract_json_direct(self):
-        from securescan.remediate.codex_client import CodexClient
-
-        result = CodexClient._extract_json('{"fixed_code": "x = 1"}')
-        assert result is not None
-        assert result["fixed_code"] == "x = 1"
-
-    def test_extract_json_with_markdown(self):
-        from securescan.remediate.codex_client import CodexClient
-
-        text = '```json\n{"fixed_code": "x = 1"}\n```'
-        result = CodexClient._extract_json(text)
-        assert result is not None

@@ -7,9 +7,11 @@ a false positive, then evaluates that argument's strength.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from securescan.analyze.codebase_digest import CodebaseDigest
 from securescan.analyze.opus_client import LLMResponse, OpusClient
+from securescan.config import config
 from securescan.detect.models import EnrichedFinding, ValidatedFinding, ValidationStatus
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,17 @@ _VALIDATION_MAP = {
 }
 
 
+def _fallback_validated_finding(finding: EnrichedFinding) -> ValidatedFinding:
+    """Build fallback validation result when adversarial review is unavailable."""
+    return ValidatedFinding(
+        enriched=finding,
+        validation_status=ValidationStatus.CONFIRMED,
+        fp_argument="Adversarial review unavailable",
+        fp_rebuttal="Original analysis stands by default",
+        final_confidence=finding.raw.confidence,
+    )
+
+
 def _parse_adversarial_response(
     finding: EnrichedFinding,
     response: LLMResponse,
@@ -98,13 +111,7 @@ def _parse_adversarial_response(
             f"{finding.raw.file_path}:{finding.raw.line_start}. "
             f"Defaulting to confirmed."
         )
-        return ValidatedFinding(
-            enriched=finding,
-            validation_status=ValidationStatus.CONFIRMED,
-            fp_argument="Adversarial review unavailable",
-            fp_rebuttal="Original analysis stands by default",
-            final_confidence=finding.raw.confidence,
-        )
+        return _fallback_validated_finding(finding)
 
     data = response.json_data
 
@@ -120,48 +127,75 @@ def _parse_adversarial_response(
     )
 
 
+def _review_single_finding(
+    client: OpusClient,
+    finding: EnrichedFinding,
+    digest: CodebaseDigest,
+) -> tuple[ValidatedFinding, str]:
+    """Run adversarial review for a single finding."""
+    prompt = _build_adversarial_prompt(finding, digest)
+    response = client.analyze(
+        system_prompt=ADVERSARIAL_SYSTEM_PROMPT,
+        user_prompt=prompt,
+        max_tokens=2048,
+        temperature=0.0,
+        expect_json=True,
+    )
+
+    result = _parse_adversarial_response(finding, response)
+    fp_strength = response.json_data.get("fp_argument_strength", "?") if response.json_data else "N/A"
+    return result, fp_strength
+
+
 def review_findings(
     client: OpusClient,
     findings: list[EnrichedFinding],
     digest: CodebaseDigest,
     confidence_threshold: float = 0.7,
+    max_workers: int | None = None,
 ) -> list[ValidatedFinding]:
     """Run adversarial review on enriched findings."""
-
-    validated: list[ValidatedFinding] = []
+    validated_results: list[ValidatedFinding | None] = [None] * len(findings)
 
     logger.info(f"Running adversarial review on {len(findings)} findings...")
+    worker_count = max(1, max_workers or config.max_concurrent_llm_calls)
 
-    for index, finding in enumerate(findings, 1):
-        logger.info(
-            f"  [{index}/{len(findings)}] Reviewing {finding.raw.vuln_type.value} in "
-            f"{finding.raw.file_path}:{finding.raw.line_start}"
-        )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_idx = {}
+        for idx, finding in enumerate(findings):
+            logger.info(
+                f"  [{idx + 1}/{len(findings)}] Reviewing {finding.raw.vuln_type.value} in "
+                f"{finding.raw.file_path}:{finding.raw.line_start}"
+            )
+            future = executor.submit(_review_single_finding, client, finding, digest)
+            future_to_idx[future] = idx
 
-        prompt = _build_adversarial_prompt(finding, digest)
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            finding = findings[idx]
+            finding_id = f"[{finding.raw.file_path}:{finding.raw.line_start}]"
 
-        response = client.analyze(
-            system_prompt=ADVERSARIAL_SYSTEM_PROMPT,
-            user_prompt=prompt,
-            max_tokens=2048,
-            temperature=0.0,
-            expect_json=True,
-        )
+            try:
+                result, fp_strength = future.result()
+            except Exception as exc:
+                logger.error(f"{finding_id} Adversarial review failed: {exc}")
+                result = _fallback_validated_finding(finding)
+                fp_strength = "N/A"
 
-        result = _parse_adversarial_response(finding, response)
-        validated.append(result)
+            validated_results[idx] = result
 
-        status_text = {
-            ValidationStatus.CONFIRMED: "CONFIRMED",
-            ValidationStatus.LIKELY_FP: "LIKELY FP",
-            ValidationStatus.UNCERTAIN: "UNCERTAIN",
-        }[result.validation_status]
+            status_text = {
+                ValidationStatus.CONFIRMED: "CONFIRMED",
+                ValidationStatus.LIKELY_FP: "LIKELY FP",
+                ValidationStatus.UNCERTAIN: "UNCERTAIN",
+            }[result.validation_status]
 
-        fp_strength = response.json_data.get("fp_argument_strength", "?") if response.json_data else "N/A"
-        logger.info(
-            f"    -> {status_text} "
-            f"(confidence: {result.final_confidence:.2f}, FP argument: {fp_strength})"
-        )
+            logger.info(
+                f"    {finding_id} -> {status_text} "
+                f"(confidence: {result.final_confidence:.2f}, FP argument: {fp_strength})"
+            )
+
+    validated = [finding for finding in validated_results if finding is not None]
 
     confirmed = sum(
         1 for finding in validated if finding.validation_status == ValidationStatus.CONFIRMED

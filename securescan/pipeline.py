@@ -247,6 +247,7 @@ def run_pipeline(
             findings=ctx.raw_findings,
             digest=digest,
             repo_name=ctx.repo_info.name,
+            max_workers=config.max_concurrent_llm_calls,
         )
 
         if not ctx.enriched_findings:
@@ -262,6 +263,7 @@ def run_pipeline(
                 findings=ctx.enriched_findings,
                 digest=digest,
                 confidence_threshold=config.confidence_threshold,
+                max_workers=config.max_concurrent_llm_calls,
             )
 
         confirmed = [finding for finding in (ctx.validated_findings or []) if finding.is_confirmed]
@@ -279,6 +281,7 @@ def run_pipeline(
                     client=client,
                     findings=ctx.validated_findings or [],
                     repo_root=ctx.repo_info.local_path,
+                    max_workers=config.max_concurrent_llm_calls,
                 )
             except Exception as e:
                 logger.warning(f"Patch generation failed: {e}")
