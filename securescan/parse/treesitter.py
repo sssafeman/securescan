@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # Try to import tree-sitter; fall back to regex parsing if unavailable
+PY_LANGUAGE: Any | None = None
+JS_LANGUAGE: Any | None = None
 try:
     import tree_sitter_javascript as tsjavascript
     import tree_sitter_python as tspython
@@ -184,6 +186,33 @@ class ParsedFile:
         return self.functions
 
 
+@dataclass(frozen=True)
+class _TreeSitterContext:
+    """Shared state for extracting nodes from one syntax tree."""
+
+    source: bytes
+    result: ParsedFile
+
+
+@dataclass(frozen=True)
+class _TreeSitterConfig:
+    """Language-specific configuration for the tree-sitter driver."""
+
+    language: str
+    grammar: Callable[[], Any]
+    handlers: dict[str, Callable[[Any, _TreeSitterContext], None]]
+
+
+@dataclass(frozen=True)
+class _FunctionMetadata:
+    """Language-specific fields for a parsed function definition."""
+
+    name: str
+    parameters: list[str]
+    is_method: bool = False
+    class_name: str | None = None
+
+
 def _read_file(path: Path) -> bytes:
     """Read file as bytes for tree-sitter."""
 
@@ -213,6 +242,128 @@ def _is_dangerous_call(call_name: str, dangerous_calls: frozenset[str]) -> bool:
     )
 
 
+def _append_tree_sitter_function(
+    node: Any,
+    context: _TreeSitterContext,
+    metadata: _FunctionMetadata,
+) -> None:
+    """Append a function definition using shared node metadata."""
+
+    context.result.functions.append(
+        FunctionDef(
+            name=metadata.name,
+            file_path=context.result.file_path,
+            line_start=node.start_point[0] + 1,
+            line_end=node.end_point[0] + 1,
+            parameters=metadata.parameters,
+            body_text=_get_text(node, context.source),
+            is_method=metadata.is_method,
+            class_name=metadata.class_name,
+        )
+    )
+
+
+def _append_tree_sitter_call(
+    node: Any,
+    context: _TreeSitterContext,
+    dangerous_calls: frozenset[str],
+) -> tuple[str, Any] | None:
+    """Append a call expression and return its name and arguments node."""
+
+    function_node = node.child_by_field_name("function")
+    if function_node is None:
+        return None
+
+    arguments_node = node.child_by_field_name("arguments")
+    call_name = _get_text(function_node, context.source)
+    context.result.calls.append(
+        FunctionCall(
+            name=call_name,
+            file_path=context.result.file_path,
+            line=node.start_point[0] + 1,
+            arguments_text=(
+                _get_text(arguments_node, context.source) if arguments_node else ""
+            ),
+            is_dangerous=_is_dangerous_call(call_name, dangerous_calls),
+        )
+    )
+    return call_name, arguments_node
+
+
+def _append_tree_sitter_import(
+    node: Any,
+    module_node: Any,
+    context: _TreeSitterContext,
+    strip_quotes: bool = False,
+) -> None:
+    """Append an import represented by a module syntax node."""
+
+    module_name = _get_text(module_node, context.source)
+    if strip_quotes:
+        module_name = module_name.strip("'\"")
+    context.result.imports.append(
+        ImportStatement(
+            module=module_name,
+            alias=None,
+            file_path=context.result.file_path,
+            line=node.start_point[0] + 1,
+        )
+    )
+
+
+def _append_tree_sitter_string(node: Any, context: _TreeSitterContext) -> None:
+    """Append a string literal with language-specific flags."""
+
+    value = _get_text(node, context.source)
+    context.result.strings.append(
+        StringLiteral(
+            value=value,
+            file_path=context.result.file_path,
+            line=node.start_point[0] + 1,
+            is_fstring=(
+                context.result.language == "python"
+                and value.startswith(("f'", 'f"', "f'''", 'f"""'))
+            ),
+            is_template_literal=(node.type == "template_string"),
+        )
+    )
+
+
+def _visit_tree_sitter_node(
+    node: Any,
+    context: _TreeSitterContext,
+    config: _TreeSitterConfig,
+) -> None:
+    """Dispatch one syntax node to its configured extraction handler."""
+
+    handler = config.handlers.get(node.type)
+    if handler is not None:
+        handler(node, context)
+
+
+def _parse_tree_sitter(
+    file_path: str,
+    abs_path: Path,
+    config: _TreeSitterConfig,
+) -> ParsedFile:
+    """Parse one file with a configured tree-sitter language."""
+
+    source = _read_file(abs_path)
+    parser = Parser(config.grammar())
+    tree = parser.parse(source)
+    result = ParsedFile(
+        file_path=file_path,
+        language=config.language,
+        line_count=source.count(b"\n") + 1,
+    )
+    context = _TreeSitterContext(source=source, result=result)
+    _walk_tree(
+        tree.root_node,
+        lambda node: _visit_tree_sitter_node(node, context, config),
+    )
+    return result
+
+
 _PYTHON_PARAMETER_NODE_TYPES = frozenset(
     {
         "identifier",
@@ -223,19 +374,25 @@ _PYTHON_PARAMETER_NODE_TYPES = frozenset(
 )
 
 
-def _python_parameters(params_node: Any, source: bytes) -> list[str]:
+def _python_parameters(
+    params_node: Any,
+    context: _TreeSitterContext,
+) -> list[str]:
     """Extract normalized Python parameter names from a parameter node."""
 
     if params_node is None:
         return []
     return [
-        _get_text(param, source).split(":")[0].split("=")[0].strip()
+        _get_text(param, context.source).split(":")[0].split("=")[0].strip()
         for param in params_node.children
         if param.type in _PYTHON_PARAMETER_NODE_TYPES
     ]
 
 
-def _python_method_context(node: Any, source: bytes) -> tuple[bool, str | None]:
+def _python_method_context(
+    node: Any,
+    context: _TreeSitterContext,
+) -> tuple[bool, str | None]:
     """Return method status and class name for a Python definition node."""
 
     parent = node.parent
@@ -249,7 +406,9 @@ def _python_method_context(node: Any, source: bytes) -> tuple[bool, str | None]:
         return False, None
 
     class_name_node = parent.parent.child_by_field_name("name")
-    class_name = _get_text(class_name_node, source) if class_name_node else None
+    class_name = (
+        _get_text(class_name_node, context.source) if class_name_node else None
+    )
     return True, class_name
 
 
@@ -266,9 +425,7 @@ def _python_function_node(node: Any) -> Any:
 
 def _extract_python_function(
     node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
+    context: _TreeSitterContext,
 ) -> None:
     """Add a Python function definition to a parse result."""
 
@@ -278,51 +435,22 @@ def _extract_python_function(
         return
 
     params_node = function_node.child_by_field_name("parameters")
-    is_method, class_name = _python_method_context(node, source)
-    result.functions.append(
-        FunctionDef(
-            name=_get_text(name_node, source),
-            file_path=file_path,
-            line_start=node.start_point[0] + 1,
-            line_end=node.end_point[0] + 1,
-            parameters=_python_parameters(params_node, source),
-            body_text=_get_text(node, source),
+    is_method, class_name = _python_method_context(node, context)
+    _append_tree_sitter_function(
+        node,
+        context,
+        _FunctionMetadata(
+            name=_get_text(name_node, context.source),
+            parameters=_python_parameters(params_node, context),
             is_method=is_method,
             class_name=class_name,
-        )
-    )
-
-
-def _extract_python_call(
-    node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
-) -> None:
-    """Add a Python call expression to a parse result."""
-
-    function_node = node.child_by_field_name("function")
-    if function_node is None:
-        return
-
-    arguments_node = node.child_by_field_name("arguments")
-    call_name = _get_text(function_node, source)
-    result.calls.append(
-        FunctionCall(
-            name=call_name,
-            file_path=file_path,
-            line=node.start_point[0] + 1,
-            arguments_text=_get_text(arguments_node, source) if arguments_node else "",
-            is_dangerous=_is_dangerous_call(call_name, DANGEROUS_CALLS_PYTHON),
-        )
+        ),
     )
 
 
 def _extract_python_import(
     node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
+    context: _TreeSitterContext,
 ) -> None:
     """Add imports represented by a Python import node to a parse result."""
 
@@ -333,71 +461,31 @@ def _extract_python_import(
         module_nodes = (module_node,) if module_node else ()
 
     for module_node in module_nodes:
-        result.imports.append(
-            ImportStatement(
-                module=_get_text(module_node, source),
-                alias=None,
-                file_path=file_path,
-                line=node.start_point[0] + 1,
-            )
-        )
+        _append_tree_sitter_import(node, module_node, context)
 
 
-def _extract_python_string(
+def _extract_python_call(
     node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
+    context: _TreeSitterContext,
 ) -> None:
-    """Add a Python string node to a parse result."""
+    """Add a Python call expression to a parse result."""
 
-    value = _get_text(node, source)
-    result.strings.append(
-        StringLiteral(
-            value=value,
-            file_path=file_path,
-            line=node.start_point[0] + 1,
-            is_fstring=value.startswith(("f'", 'f"', "f'''", 'f"""')),
-        )
-    )
+    _append_tree_sitter_call(node, context, DANGEROUS_CALLS_PYTHON)
 
 
-def _visit_python_node(
-    node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
-) -> None:
-    """Extract supported structures from one Python syntax node."""
-
-    if node.type in ("function_definition", "decorated_definition"):
-        _extract_python_function(node, source, file_path, result)
-    elif node.type == "call":
-        _extract_python_call(node, source, file_path, result)
-    elif node.type in ("import_statement", "import_from_statement"):
-        _extract_python_import(node, source, file_path, result)
-    elif node.type in ("string", "concatenated_string"):
-        _extract_python_string(node, source, file_path, result)
-
-
-def _parse_python_ts(file_path: str, abs_path: Path) -> ParsedFile:
-    """Parse a Python file using tree-sitter."""
-
-    source = _read_file(abs_path)
-    parser = Parser(PY_LANGUAGE)
-    tree = parser.parse(source)
-
-    result = ParsedFile(
-        file_path=file_path,
-        language="python",
-        line_count=source.count(b"\n") + 1,
-    )
-
-    _walk_tree(
-        tree.root_node,
-        lambda node: _visit_python_node(node, source, file_path, result),
-    )
-    return result
+_PYTHON_TREE_SITTER_CONFIG = _TreeSitterConfig(
+    language="python",
+    grammar=lambda: PY_LANGUAGE,
+    handlers={
+        "function_definition": _extract_python_function,
+        "decorated_definition": _extract_python_function,
+        "call": _extract_python_call,
+        "import_statement": _extract_python_import,
+        "import_from_statement": _extract_python_import,
+        "string": _append_tree_sitter_string,
+        "concatenated_string": _append_tree_sitter_string,
+    },
+)
 
 
 _JAVASCRIPT_FUNCTION_NODE_TYPES = frozenset(
@@ -417,12 +505,15 @@ _JAVASCRIPT_PARAMETER_NODE_TYPES = frozenset(
 )
 
 
-def _javascript_function_name(node: Any, source: bytes) -> str:
+def _javascript_function_name(
+    node: Any,
+    context: _TreeSitterContext,
+) -> str:
     """Extract a declared or inferred JavaScript function name."""
 
     name_node = node.child_by_field_name("name")
     if name_node is not None:
-        return _get_text(name_node, source)
+        return _get_text(name_node, context.source)
     if node.type != "arrow_function":
         return "<anonymous>"
 
@@ -430,17 +521,22 @@ def _javascript_function_name(node: Any, source: bytes) -> str:
     if parent is None or parent.type != "variable_declarator":
         return "<anonymous>"
     parent_name = parent.child_by_field_name("name")
-    return _get_text(parent_name, source) if parent_name else "<anonymous>"
+    return (
+        _get_text(parent_name, context.source) if parent_name else "<anonymous>"
+    )
 
 
-def _javascript_parameters(node: Any, source: bytes) -> list[str]:
+def _javascript_parameters(
+    node: Any,
+    context: _TreeSitterContext,
+) -> list[str]:
     """Extract normalized JavaScript parameters from a function node."""
 
     params_node = node.child_by_field_name("parameters")
     if params_node is None:
         return []
     return [
-        _get_text(param, source).split("=")[0].strip()
+        _get_text(param, context.source).split("=")[0].strip()
         for param in params_node.children
         if param.type in _JAVASCRIPT_PARAMETER_NODE_TYPES
     ]
@@ -448,144 +544,70 @@ def _javascript_parameters(node: Any, source: bytes) -> list[str]:
 
 def _extract_javascript_function(
     node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
+    context: _TreeSitterContext,
 ) -> None:
     """Add a JavaScript function definition to a parse result."""
 
-    result.functions.append(
-        FunctionDef(
-            name=_javascript_function_name(node, source),
-            file_path=file_path,
-            line_start=node.start_point[0] + 1,
-            line_end=node.end_point[0] + 1,
-            parameters=_javascript_parameters(node, source),
-            body_text=_get_text(node, source),
-        )
-    )
-
-
-def _append_javascript_import(
-    module_node: Any,
-    node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
-) -> None:
-    """Add a JavaScript module node to a parse result."""
-
-    result.imports.append(
-        ImportStatement(
-            module=_get_text(module_node, source).strip("'\""),
-            alias=None,
-            file_path=file_path,
-            line=node.start_point[0] + 1,
-        )
+    _append_tree_sitter_function(
+        node,
+        context,
+        _FunctionMetadata(
+            name=_javascript_function_name(node, context),
+            parameters=_javascript_parameters(node, context),
+        ),
     )
 
 
 def _extract_javascript_call(
     node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
+    context: _TreeSitterContext,
 ) -> None:
     """Add a JavaScript call expression and any require import."""
 
-    function_node = node.child_by_field_name("function")
-    if function_node is None:
+    call_details = _append_tree_sitter_call(node, context, DANGEROUS_CALLS_JS)
+    if call_details is None:
         return
 
-    arguments_node = node.child_by_field_name("arguments")
-    call_name = _get_text(function_node, source)
-    result.calls.append(
-        FunctionCall(
-            name=call_name,
-            file_path=file_path,
-            line=node.start_point[0] + 1,
-            arguments_text=_get_text(arguments_node, source) if arguments_node else "",
-            is_dangerous=_is_dangerous_call(call_name, DANGEROUS_CALLS_JS),
-        )
-    )
-
+    call_name, arguments_node = call_details
     if call_name == "require" and arguments_node and arguments_node.child_count > 1:
-        _append_javascript_import(
-            arguments_node.children[1],
+        _append_tree_sitter_import(
             node,
-            source,
-            file_path,
-            result,
+            arguments_node.children[1],
+            context,
+            strip_quotes=True,
         )
 
 
 def _extract_javascript_import(
     node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
+    context: _TreeSitterContext,
 ) -> None:
     """Add an ES module import to a parse result."""
 
     module_node = node.child_by_field_name("source")
     if module_node is not None:
-        _append_javascript_import(module_node, node, source, file_path, result)
-
-
-def _extract_javascript_string(
-    node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
-) -> None:
-    """Add a JavaScript string node to a parse result."""
-
-    result.strings.append(
-        StringLiteral(
-            value=_get_text(node, source),
-            file_path=file_path,
-            line=node.start_point[0] + 1,
-            is_template_literal=(node.type == "template_string"),
+        _append_tree_sitter_import(
+            node,
+            module_node,
+            context,
+            strip_quotes=True,
         )
-    )
 
 
-def _visit_javascript_node(
-    node: Any,
-    source: bytes,
-    file_path: str,
-    result: ParsedFile,
-) -> None:
-    """Extract supported structures from one JavaScript syntax node."""
-
-    if node.type in _JAVASCRIPT_FUNCTION_NODE_TYPES:
-        _extract_javascript_function(node, source, file_path, result)
-
-    if node.type == "call_expression":
-        _extract_javascript_call(node, source, file_path, result)
-    elif node.type == "import_statement":
-        _extract_javascript_import(node, source, file_path, result)
-    elif node.type in ("string", "template_string"):
-        _extract_javascript_string(node, source, file_path, result)
-
-
-def _parse_javascript_ts(file_path: str, abs_path: Path) -> ParsedFile:
-    """Parse a JavaScript/TypeScript file using tree-sitter."""
-
-    source = _read_file(abs_path)
-    parser = Parser(JS_LANGUAGE)
-    tree = parser.parse(source)
-    result = ParsedFile(
-        file_path=file_path,
-        language="javascript",
-        line_count=source.count(b"\n") + 1,
-    )
-
-    _walk_tree(
-        tree.root_node,
-        lambda node: _visit_javascript_node(node, source, file_path, result),
-    )
-    return result
+_JAVASCRIPT_TREE_SITTER_CONFIG = _TreeSitterConfig(
+    language="javascript",
+    grammar=lambda: JS_LANGUAGE,
+    handlers={
+        **{
+            node_type: _extract_javascript_function
+            for node_type in _JAVASCRIPT_FUNCTION_NODE_TYPES
+        },
+        "call_expression": _extract_javascript_call,
+        "import_statement": _extract_javascript_import,
+        "string": _append_tree_sitter_string,
+        "template_string": _append_tree_sitter_string,
+    },
+)
 
 
 # Regex fallback (when tree-sitter unavailable)
@@ -618,6 +640,7 @@ _IMPORT_GO_BLOCK_RE = re.compile(
     r"^\s*import\s*\((.*?)\)",
     re.MULTILINE | re.DOTALL,
 )
+_GO_BLOCK_MODULE_RE = re.compile(r'"([^"]+)"')
 _RUST_FUNC_RE = re.compile(
     r"^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*[<(]",
     re.MULTILINE,
@@ -667,22 +690,106 @@ _DANGEROUS_PATTERN_JAVA = (
 )
 
 
-def _match_line_number(source_text: str, match: re.Match[str]) -> int:
+@dataclass(frozen=True)
+class _RegexRule:
+    """One named capture rule for fallback extraction."""
+
+    pattern: re.Pattern[str]
+    value_groups: tuple[int, ...] = (1,)
+    strip_value: bool = False
+    parameters_group: int | None = None
+
+
+@dataclass(frozen=True)
+class _RegexBlockImportRule:
+    """One rule for imports nested inside a matched block."""
+
+    pattern: re.Pattern[str]
+    module_pattern: re.Pattern[str]
+    content_group: int = 1
+
+
+@dataclass(frozen=True)
+class _RegexExtractionSpec:
+    """Fallback extraction rules for one language."""
+
+    functions: tuple[_RegexRule, ...] = ()
+    imports: tuple[_RegexRule, ...] = ()
+    block_imports: tuple[_RegexBlockImportRule, ...] = ()
+
+
+_PYTHON_REGEX_SPEC = _RegexExtractionSpec(
+    functions=(
+        _RegexRule(
+            pattern=_PY_FUNC_RE,
+            parameters_group=2,
+        ),
+    ),
+    imports=(
+        _RegexRule(
+            pattern=_IMPORT_PY_RE,
+            value_groups=(1, 2),
+        ),
+    ),
+)
+_JAVASCRIPT_REGEX_SPEC = _RegexExtractionSpec(
+    functions=(
+        _RegexRule(
+            pattern=_JS_FUNC_RE,
+            value_groups=(1, 2),
+        ),
+    ),
+    imports=(
+        _RegexRule(
+            pattern=_IMPORT_JS_RE,
+            value_groups=(1, 2),
+        ),
+    ),
+)
+_GO_REGEX_SPEC = _RegexExtractionSpec(
+    functions=(_RegexRule(pattern=_GO_FUNC_RE),),
+    imports=(_RegexRule(pattern=_IMPORT_GO_SINGLE_RE),),
+    block_imports=(
+        _RegexBlockImportRule(
+            pattern=_IMPORT_GO_BLOCK_RE,
+            module_pattern=_GO_BLOCK_MODULE_RE,
+        ),
+    ),
+)
+_RUST_REGEX_SPEC = _RegexExtractionSpec(
+    functions=(_RegexRule(pattern=_RUST_FUNC_RE),),
+    imports=(
+        _RegexRule(
+            pattern=_IMPORT_RUST_USE_RE,
+            strip_value=True,
+        ),
+        _RegexRule(pattern=_IMPORT_RUST_EXTERN_RE),
+    ),
+)
+_JAVA_REGEX_SPEC = _RegexExtractionSpec(
+    functions=(
+        _RegexRule(pattern=_JAVA_CLASS_RE),
+        _RegexRule(pattern=_JAVA_METHOD_RE),
+    ),
+    imports=(_RegexRule(pattern=_IMPORT_JAVA_RE),),
+)
+
+
+def _match_line_number(match: re.Match[str]) -> int:
     """Return the one-based line number where a regex match begins."""
 
-    return source_text[: match.start()].count("\n") + 1
+    return match.string[: match.start()].count("\n") + 1
 
 
 def _append_regex_function(
     result: ParsedFile,
-    source_text: str,
     match: re.Match[str],
     name: str,
     parameters: list[str] | None = None,
 ) -> None:
     """Append a function captured by a fallback regex."""
 
-    line_number = _match_line_number(source_text, match)
+    line_number = _match_line_number(match)
     result.functions.append(
         FunctionDef(
             name=name,
@@ -697,7 +804,6 @@ def _append_regex_function(
 
 def _append_regex_import(
     result: ParsedFile,
-    source_text: str,
     match: re.Match[str],
     module_name: str,
     line_number: int | None = None,
@@ -709,114 +815,85 @@ def _append_regex_import(
             module=module_name,
             alias=None,
             file_path=result.file_path,
-            line=line_number or _match_line_number(source_text, match),
+            line=line_number or _match_line_number(match),
         )
     )
 
 
-def _extract_python_regex(result: ParsedFile, source_text: str) -> None:
-    """Extract Python definitions and imports with fallback regexes."""
+def _regex_rule_value(match: re.Match[str], rule: _RegexRule) -> str:
+    """Return the first populated value capture for a regex rule."""
 
-    for match in _PY_FUNC_RE.finditer(source_text):
-        parameters = [
-            part.strip().split(":")[0].split("=")[0]
-            for part in match.group(2).split(",")
-            if part.strip()
-        ]
-        _append_regex_function(result, source_text, match, match.group(1), parameters)
-
-    for match in _IMPORT_PY_RE.finditer(source_text):
-        _append_regex_import(
-            result,
-            source_text,
-            match,
-            match.group(1) or match.group(2),
-        )
+    value = next(
+        match.group(group)
+        for group in rule.value_groups
+        if match.group(group) is not None
+    )
+    return value.strip() if rule.strip_value else value
 
 
-def _extract_javascript_regex(result: ParsedFile, source_text: str) -> None:
-    """Extract JavaScript definitions and imports with fallback regexes."""
+def _regex_rule_parameters(
+    match: re.Match[str],
+    rule: _RegexRule,
+) -> list[str] | None:
+    """Return normalized parameters when a regex rule captures them."""
 
-    for match in _JS_FUNC_RE.finditer(source_text):
-        _append_regex_function(
-            result,
-            source_text,
-            match,
-            match.group(1) or match.group(2),
-        )
-
-    for match in _IMPORT_JS_RE.finditer(source_text):
-        _append_regex_import(
-            result,
-            source_text,
-            match,
-            match.group(1) or match.group(2),
-        )
+    if rule.parameters_group is None:
+        return None
+    return [
+        part.strip().split(":")[0].split("=")[0]
+        for part in match.group(rule.parameters_group).split(",")
+        if part.strip()
+    ]
 
 
-def _extract_go_regex(result: ParsedFile, source_text: str) -> None:
-    """Extract Go definitions and imports with fallback regexes."""
+def _extract_regex_spec(
+    result: ParsedFile,
+    source_text: str,
+    spec: _RegexExtractionSpec,
+) -> None:
+    """Apply configured function and import rules to fallback source."""
 
-    for match in _GO_FUNC_RE.finditer(source_text):
-        _append_regex_function(result, source_text, match, match.group(1))
-
-    for match in _IMPORT_GO_SINGLE_RE.finditer(source_text):
-        _append_regex_import(result, source_text, match, match.group(1))
-
-    for match in _IMPORT_GO_BLOCK_RE.finditer(source_text):
-        line_number = _match_line_number(source_text, match)
-        for module_name in re.findall(r'"([^"]+)"', match.group(1)):
-            _append_regex_import(
+    for rule in spec.functions:
+        for match in rule.pattern.finditer(source_text):
+            _append_regex_function(
                 result,
-                source_text,
                 match,
-                module_name,
-                line_number,
+                _regex_rule_value(match, rule),
+                _regex_rule_parameters(match, rule),
             )
 
+    for rule in spec.imports:
+        for match in rule.pattern.finditer(source_text):
+            _append_regex_import(
+                result,
+                match,
+                _regex_rule_value(match, rule),
+            )
 
-def _extract_rust_regex(result: ParsedFile, source_text: str) -> None:
-    """Extract Rust definitions and imports with fallback regexes."""
-
-    for match in _RUST_FUNC_RE.finditer(source_text):
-        _append_regex_function(result, source_text, match, match.group(1))
-
-    for match in _IMPORT_RUST_USE_RE.finditer(source_text):
-        _append_regex_import(result, source_text, match, match.group(1).strip())
-
-    for match in _IMPORT_RUST_EXTERN_RE.finditer(source_text):
-        _append_regex_import(result, source_text, match, match.group(1))
-
-
-def _extract_java_regex(result: ParsedFile, source_text: str) -> None:
-    """Extract Java definitions and imports with fallback regexes."""
-
-    for match in _JAVA_CLASS_RE.finditer(source_text):
-        _append_regex_function(result, source_text, match, match.group(1))
-
-    for match in _JAVA_METHOD_RE.finditer(source_text):
-        _append_regex_function(result, source_text, match, match.group(1))
-
-    for match in _IMPORT_JAVA_RE.finditer(source_text):
-        _append_regex_import(result, source_text, match, match.group(1))
+    for rule in spec.block_imports:
+        for match in rule.pattern.finditer(source_text):
+            line_number = _match_line_number(match)
+            content = match.group(rule.content_group)
+            for module_name in rule.module_pattern.findall(content):
+                _append_regex_import(result, match, module_name, line_number)
 
 
-_REGEX_EXTRACTORS: dict[str, Callable[[ParsedFile, str], None]] = {
-    "python": _extract_python_regex,
-    "javascript": _extract_javascript_regex,
-    "typescript": _extract_javascript_regex,
-    "go": _extract_go_regex,
-    "rust": _extract_rust_regex,
-    "java": _extract_java_regex,
+_REGEX_SPECS: dict[str, _RegexExtractionSpec] = {
+    "python": _PYTHON_REGEX_SPEC,
+    "javascript": _JAVASCRIPT_REGEX_SPEC,
+    "typescript": _JAVASCRIPT_REGEX_SPEC,
+    "go": _GO_REGEX_SPEC,
+    "rust": _RUST_REGEX_SPEC,
+    "java": _JAVA_REGEX_SPEC,
 }
 
-_NAMED_DANGEROUS_CALLS = {
+_FALLBACK_DANGEROUS_CALLS: dict[
+    str,
+    frozenset[str] | tuple[re.Pattern[str], ...],
+] = {
     "python": DANGEROUS_CALLS_PYTHON,
     "javascript": DANGEROUS_CALLS_JS,
     "typescript": DANGEROUS_CALLS_JS,
-}
-
-_PATTERN_DANGEROUS_CALLS = {
     "go": _DANGEROUS_PATTERN_GO,
     "rust": _DANGEROUS_PATTERN_RUST,
     "java": _DANGEROUS_PATTERN_JAVA,
@@ -842,37 +919,36 @@ def _append_fallback_dangerous_call(
     )
 
 
-def _scan_named_dangerous_calls(
+def _dangerous_detector_matches(
+    detector: str | re.Pattern[str],
+    line: str,
+) -> bool:
+    """Return whether one fallback detector matches a source line."""
+
+    if isinstance(detector, str):
+        return detector in line and "(" in line
+    return detector.search(line) is not None
+
+
+def _dangerous_detector_name(detector: str | re.Pattern[str]) -> str:
+    """Return the call name emitted for a fallback detector."""
+
+    return detector if isinstance(detector, str) else detector.pattern
+
+
+def _scan_dangerous_calls(
     result: ParsedFile,
     lines: list[str],
-    dangerous_calls: frozenset[str],
+    detectors: frozenset[str] | tuple[re.Pattern[str], ...],
 ) -> None:
-    """Find dangerous calls using the legacy substring matching rules."""
+    """Find dangerous calls with configured string or regex detectors."""
 
     for line_number, line in enumerate(lines, 1):
-        for dangerous_call in dangerous_calls:
-            if dangerous_call in line and "(" in line:
+        for detector in detectors:
+            if _dangerous_detector_matches(detector, line):
                 _append_fallback_dangerous_call(
                     result,
-                    dangerous_call,
-                    line_number,
-                    line,
-                )
-
-
-def _scan_pattern_dangerous_calls(
-    result: ParsedFile,
-    lines: list[str],
-    patterns: tuple[re.Pattern[str], ...],
-) -> None:
-    """Find dangerous calls using compiled fallback patterns."""
-
-    for line_number, line in enumerate(lines, 1):
-        for pattern in patterns:
-            if pattern.search(line):
-                _append_fallback_dangerous_call(
-                    result,
-                    pattern.pattern,
+                    _dangerous_detector_name(detector),
                     line_number,
                     line,
                 )
@@ -885,14 +961,9 @@ def _scan_fallback_dangerous_calls(
 ) -> None:
     """Dispatch dangerous call scanning for a fallback language."""
 
-    named_calls = _NAMED_DANGEROUS_CALLS.get(language)
-    if named_calls is not None:
-        _scan_named_dangerous_calls(result, lines, named_calls)
-        return
-
-    patterns = _PATTERN_DANGEROUS_CALLS.get(language)
-    if patterns is not None:
-        _scan_pattern_dangerous_calls(result, lines, patterns)
+    detectors = _FALLBACK_DANGEROUS_CALLS.get(language)
+    if detectors is not None:
+        _scan_dangerous_calls(result, lines, detectors)
 
 
 def _parse_regex_fallback(file_path: str, abs_path: Path, language: str) -> ParsedFile:
@@ -912,19 +983,19 @@ def _parse_regex_fallback(file_path: str, abs_path: Path, language: str) -> Pars
         language=language,
         line_count=source_text.count("\n") + 1,
     )
-    extractor = _REGEX_EXTRACTORS.get(language)
-    if extractor is not None:
-        extractor(result, source_text)
+    spec = _REGEX_SPECS.get(language)
+    if spec is not None:
+        _extract_regex_spec(result, source_text, spec)
     _scan_fallback_dangerous_calls(result, source_text.split("\n"), language)
     return result
 
 
 # Public API
 
-_TREE_SITTER_PARSERS: dict[str, Callable[[str, Path], ParsedFile]] = {
-    "python": _parse_python_ts,
-    "javascript": _parse_javascript_ts,
-    "typescript": _parse_javascript_ts,
+_TREE_SITTER_CONFIGS: dict[str, _TreeSitterConfig] = {
+    "python": _PYTHON_TREE_SITTER_CONFIG,
+    "javascript": _JAVASCRIPT_TREE_SITTER_CONFIG,
+    "typescript": _JAVASCRIPT_TREE_SITTER_CONFIG,
 }
 
 
@@ -944,10 +1015,10 @@ def parse_file(file_path: str, abs_path: Path, language: str) -> ParsedFile:
         return _parse_regex_fallback(file_path, abs_path, language)
 
     try:
-        parser = _TREE_SITTER_PARSERS.get(language)
-        if parser is None:
+        config = _TREE_SITTER_CONFIGS.get(language)
+        if config is None:
             return _parse_regex_fallback(file_path, abs_path, language)
-        return parser(file_path, abs_path)
+        return _parse_tree_sitter(file_path, abs_path, config)
     except Exception as e:  # pragma: no cover - parser fallback path
         logger.warning(f"tree-sitter parse failed for {file_path}, using regex fallback: {e}")
         return _parse_regex_fallback(file_path, abs_path, language)
